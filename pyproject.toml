@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xorq-style"
+version = "0.1.0"
+description = "Shared style enforcement and Claude Code tooling for xorq Python projects"
+requires-python = ">=3.10"
+license = "MIT"
+
+[project.scripts]
+xorq-check-style = "xorq_style.check:main"

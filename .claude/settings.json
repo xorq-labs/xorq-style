@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '%s' \"$CLAUDE_TOOL_INPUT\" | xorq-check-style --hook"
+          }
+        ]
+      }
+    ]
+  }
+}

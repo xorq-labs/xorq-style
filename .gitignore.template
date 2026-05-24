@@ -1,0 +1,10 @@
+.env.*
+.envrc.*
+.gitignore
+.direnv
+.coverage
+__pycache__
+*.egg-info
+dist
+build
+.venv
