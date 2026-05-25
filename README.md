@@ -38,6 +38,8 @@ Add to your project's `.claude/settings.json`:
 }
 ```
 
+The hook runs after every `Edit` or `Write` tool call. It reads the tool input from stdin, checks the written file against xorq style rules, and exits non-zero if there are violations — causing Claude Code to see and fix them.
+
 ### As a CLI
 
 ```bash

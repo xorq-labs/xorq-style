@@ -47,7 +47,7 @@ If the commit fixes a GitHub issue, add something like this to the bottom of the
 3. Create a release branch: `git switch --create release-$version`
 4. Update the version in `pyproject.toml`: `version = "$version"`
 5. Generate the changelog: `uv run git-cliff --tag v$version -o CHANGELOG.md`
-6. Commit: `git add --update && git commit -m "release: $version"`
+6. Commit: `git add pyproject.toml CHANGELOG.md && git commit -m "release: $version"`
 7. Open a PR and wait for CI to pass:
    `git push --set-upstream origin release-$version && gh pr create --fill`
 8. Squash and merge the PR: `gh pr merge --squash`
