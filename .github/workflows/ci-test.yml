@@ -63,8 +63,14 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install with lowest direct dependency versions
-        run: uv sync --group dev --resolution lowest-direct
+      - name: Create venv
+        run: uv venv
+
+      - name: Install project with lowest direct dependency versions
+        run: uv pip install -e . --resolution lowest-direct
+
+      - name: Install dev tools
+        run: uv pip install pytest
 
       - name: Show resolved versions
         run: uv pip list
