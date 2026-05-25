@@ -29,7 +29,7 @@ Add to your project's `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "command -v xorq-check-style >/dev/null 2>&1 && printf '%s' \"$CLAUDE_TOOL_INPUT\" | xorq-check-style --hook || true"
+            "command": "{ command -v xorq-check-style >/dev/null 2>&1 || exit 0; } && xorq-check-style --hook"
           }
         ]
       }
