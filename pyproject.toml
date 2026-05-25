@@ -124,6 +124,7 @@ sort_commits = "oldest"
 
 [dependency-groups]
 dev = [
+    "git-cliff<3.0.0,>=2.2.1",
     "ipython>=8.39.0",
     "mypy",
     "pre-commit",
