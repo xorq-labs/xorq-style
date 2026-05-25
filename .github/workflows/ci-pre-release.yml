@@ -42,4 +42,4 @@ jobs:
       - name: Build and publish to TestPyPI
         run: |
           uv build
-          uv publish --publish-url https://test.pypi.org/legacy/ --trusted-publishing always --skip-existing
+          uv publish --publish-url https://test.pypi.org/legacy/ --trusted-publishing always --check-url https://test.pypi.org/simple/
