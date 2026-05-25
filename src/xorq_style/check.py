@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 import click
+from click.shell_completion import get_completion_class
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -739,8 +740,6 @@ _COMPLETION_INSTALL_PATHS = {
 
 
 def _get_completion_source(shell: str) -> str:
-    from click.shell_completion import get_completion_class
-
     comp_cls = get_completion_class(shell)
     if comp_cls is None:
         raise click.UsageError(f"Unsupported shell: {shell}")
