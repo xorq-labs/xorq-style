@@ -1,6 +1,3 @@
-.env.*
-.envrc.*
-.gitignore
 .direnv
 .coverage
 __pycache__
@@ -8,3 +5,8 @@ __pycache__
 dist
 build
 .venv
+
+.env.*
+.envrc.*
+.gitignore
+.claude

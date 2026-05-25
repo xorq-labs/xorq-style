@@ -8,10 +8,10 @@ Shared style enforcement and Claude Code tooling for xorq Python projects.
 pip install xorq-style
 ```
 
-Or as a dev dependency:
+Or as a dev dependency (with [uv](https://docs.astral.sh/uv/)):
 
 ```bash
-pip install -e ".[dev]"  # if added to your project's dev extras
+uv sync --group dev
 ```
 
 ## Usage
@@ -46,6 +46,18 @@ xorq-check-style --list                          # show all rules
 xorq-check-style --disable=print,dataclasses .   # skip specific rules
 ```
 
+### Shell completions
+
+```bash
+# one-time install to standard location
+xorq-check-style install-completion bash   # or zsh, fish
+
+# or eval in your shell config
+eval "$(xorq-check-style completion bash)"
+```
+
+The `--disable` option supports tab completion for rule names, including comma-separated lists.
+
 ## Rules
 
 | Rule | Description |
@@ -58,6 +70,6 @@ xorq-check-style --disable=print,dataclasses .   # skip specific rules
 | `future-annotations` | Missing `from __future__ import annotations` |
 | `os-path` | No os.path (use pathlib.Path) |
 | `dataclasses` | No dataclasses (use attrs) |
-| `cache-method` | No @functools.cache on methods (leaks memory via self) |
+| `cache-method` | No @functools.cache/lru_cache on methods (leaks memory via self) |
 | `exception-hierarchy` | Custom exceptions must inherit from XorqError |
 | `print` | No bare print() in library code (use logging/click.echo) |
