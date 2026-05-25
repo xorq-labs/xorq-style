@@ -834,32 +834,47 @@ def test_parse_disable_invalid_rule() -> None:
 def test_hook_no_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "mod.py"
     p.write_text("from __future__ import annotations\nx = 1\n")
-    tool_input = json.dumps({"file_path": str(p), "new_string": "x = 1"})
-    monkeypatch.setattr("sys.stdin", io.StringIO(tool_input))
+    payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     _hook([])
 
 
 def test_hook_with_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "mod.py"
     p.write_text("x = 1\n")
-    tool_input = json.dumps({"file_path": str(p), "new_string": "x = 1"})
-    monkeypatch.setattr("sys.stdin", io.StringIO(tool_input))
+    payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     with pytest.raises(SystemExit):
         _hook([])
 
 
 def test_hook_empty_filepath(monkeypatch: pytest.MonkeyPatch) -> None:
-    tool_input = json.dumps({"file_path": "", "new_string": "x"})
-    monkeypatch.setattr("sys.stdin", io.StringIO(tool_input))
+    payload = json.dumps({"tool_input": {"file_path": "", "new_string": "x"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     _hook([])
 
 
 def test_hook_with_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "mod.py"
     p.write_text("x = 1\n")
-    tool_input = json.dumps({"file_path": str(p), "new_string": "x = 1"})
-    monkeypatch.setattr("sys.stdin", io.StringIO(tool_input))
+    payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     _hook(["--hook", "--disable=future-annotations"])
+
+
+def test_hook_bare_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fallback: bare payload without tool_input wrapper still works."""
+    p = tmp_path / "mod.py"
+    p.write_text("from __future__ import annotations\nx = 1\n")
+    payload = json.dumps({"file_path": str(p), "new_string": "x = 1"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    _hook([])
+
+
+def test_hook_non_dict_tool_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = json.dumps({"tool_input": "unexpected"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    _hook([])
 
 
 def test_main_with_file(tmp_path: Path) -> None:

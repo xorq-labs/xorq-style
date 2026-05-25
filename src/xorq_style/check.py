@@ -712,7 +712,10 @@ def _print_and_exit(errors: tuple[Violation, ...]) -> NoReturn:
 
 def _hook(args: list[str]) -> None:
     disabled, _ = _parse_disable(args)
-    tool_input = json.load(sys.stdin)
+    hook_input = json.load(sys.stdin)
+    tool_input = hook_input.get("tool_input", hook_input)
+    if not isinstance(tool_input, dict):
+        return
     filepath = tool_input.get("file_path", "")
     if not filepath:
         return
