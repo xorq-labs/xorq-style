@@ -44,11 +44,11 @@ If the commit fixes a GitHub issue, add something like this to the bottom of the
 
 1. Ensure you're on upstream main: `git switch main && git pull`
 2. Compute the new version number (`$version`) according to [Semantic Versioning](https://semver.org/) rules.
-3. Create a release branch: `git switch --create=release-$version`
+3. Create a release branch: `git switch --create release-$version`
 4. Update the version in `pyproject.toml`: `version = "$version"`
 5. Commit: `git add --update && git commit -m "release: $version"`
-6. Push: `git push --set-upstream origin release-$version`
-7. Open a PR for the release branch and wait for CI to pass.
-8. Squash and merge the PR.
-9. Tag the updated main and push: `git fetch && git tag v$version origin/main && git push --tags`
-10. The `v*` tag triggers the [publish workflow](.github/workflows/publish.yml), which builds and publishes to PyPI via Trusted Publishing.
+6. Open a PR and wait for CI to pass:
+   `git push --set-upstream origin release-$version && gh pr create --fill`
+7. Squash and merge the PR: `gh pr merge --squash`
+8. Tag the updated main and push: `git fetch && git tag v$version origin/main && git push --tags`
+9. The `v*` tag triggers the [publish workflow](.github/workflows/publish.yml), which builds and publishes to PyPI via Trusted Publishing.
