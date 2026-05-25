@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xorq-style"
-version = "0.1.1"
+version = "0.1.2"
 description = "Shared style enforcement and Claude Code tooling for xorq Python projects"
 requires-python = ">=3.10"
 license = "MIT"
@@ -124,6 +124,7 @@ sort_commits = "oldest"
 
 [dependency-groups]
 dev = [
+    "git-cliff<3.0.0,>=2.2.1",
     "ipython>=8.39.0",
     "mypy",
     "pre-commit",
