@@ -45,7 +45,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Build package
-        run: uv build
+        run: uv build --python ${{ matrix.python-version }}
 
       - name: Test wheel installation
         shell: bash
