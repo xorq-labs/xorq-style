@@ -1,0 +1,45 @@
+name: ci-pre-release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    uses: ./.github/workflows/ci-lint.yml
+
+  test:
+    uses: ./.github/workflows/ci-test.yml
+
+  test-install:
+    uses: ./.github/workflows/ci-test-install.yml
+
+  pre-release:
+    name: Publish to TestPyPI
+    needs: [lint, test, test-install]
+    runs-on: ubuntu-latest
+    environment:
+      name: pre-release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Build and publish to TestPyPI
+        run: |
+          uv build
+          uv publish --publish-url https://test.pypi.org/legacy/ --trusted-publishing always --skip-existing
