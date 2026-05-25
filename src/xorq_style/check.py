@@ -653,7 +653,7 @@ def check(
     return tuple(results)
 
 
-class _DisableType(click.ParamType["frozenset[RuleId]"]):
+class _DisableType(click.ParamType):  # type: ignore[type-arg]
     name = "rules"
 
     def convert(
