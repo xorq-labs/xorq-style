@@ -36,44 +36,30 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
       - name: Build package
-        run: uv build
+        run: uv build --python ${{ matrix.python-version }}
 
       - name: Test wheel installation
         shell: bash
         run: |
-          python -m venv .venv-wheel
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            source .venv-wheel/Scripts/activate
-          else
-            source .venv-wheel/bin/activate
-          fi
-
-          pip install --upgrade pip
-          pip install dist/*.whl
+          uv venv .venv-wheel --python ${{ matrix.python-version }}
+          uv pip install --python .venv-wheel dist/*.whl
 
           mkdir -p test-import && cd test-import
-          python -c "import xorq_style; print(f'Successfully imported {xorq_style.__name__}')"
+          uv run --python ../.venv-wheel python -c "import xorq_style; print(f'Successfully imported {xorq_style.__name__}')"
 
       - name: Test sdist installation
         shell: bash
         run: |
-          python -m venv .venv-sdist
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            source .venv-sdist/Scripts/activate
-          else
-            source .venv-sdist/bin/activate
-          fi
+          uv venv .venv-sdist --python ${{ matrix.python-version }}
+          uv pip install --python .venv-sdist dist/*.tar.gz
 
-          pip install --upgrade pip
-          pip install dist/*.tar.gz
-          python -c "import xorq_style; print(f'Successfully imported {xorq_style.__name__}')"
+          uv run --python .venv-sdist python -c "import xorq_style; print(f'Successfully imported {xorq_style.__name__}')"
