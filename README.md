@@ -75,3 +75,38 @@ The `--disable` option supports tab completion for rule names, including comma-s
 | `cache-method` | No @functools.cache/lru_cache on methods (leaks memory via self) |
 | `exception-hierarchy` | Custom exceptions must inherit from XorqError |
 | `print` | No bare print() in library code (use logging/click.echo) |
+| `type-annotations` | Functions must have type annotations |
+
+## Configuration
+
+Add a `[tool.xorq-style]` section to your `pyproject.toml`:
+
+```toml
+[tool.xorq-style]
+disable = ["dataclasses", "os-path"]   # disable rules globally
+
+[tool.xorq-style.os-environ]
+allow-paths = ["common/", "utils/"]    # allow os.environ in these paths
+
+[tool.xorq-style.exception-hierarchy]
+base-class = "XorqError"              # expected base class (default: XorqError)
+
+[tool.xorq-style.print]
+allow-files = ["cli.py"]              # allow print() in these filenames
+```
+
+All fields are optional. The config file is discovered by walking up from the checked file's directory.
+
+## Inline suppression
+
+Suppress a rule on a single line with a trailing comment:
+
+```python
+from dataclasses import dataclass  # xorq-style: disable=dataclasses
+```
+
+Multiple rules can be comma-separated:
+
+```python
+import os.path  # xorq-style: disable=os-path,deferred-stdlib
+```
