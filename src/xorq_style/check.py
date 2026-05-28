@@ -706,7 +706,7 @@ def _parse_disable(args: list[str]) -> tuple[frozenset[RuleId], tuple[str, ...]]
 
 def _print_and_exit(errors: tuple[Violation, ...]) -> NoReturn:
     for error in errors:
-        click.echo(error)
+        click.echo(error, err=True)
     sys.exit(1)
 
 
