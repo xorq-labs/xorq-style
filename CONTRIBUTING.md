@@ -46,10 +46,12 @@ If the commit fixes a GitHub issue, add something like this to the bottom of the
 2. Compute the new version number (`$version`) according to [Semantic Versioning](https://semver.org/) rules.
 3. Create a release branch: `git switch --create release-$version`
 4. Update the version in `pyproject.toml`: `version = "$version"`
-5. Generate the changelog: `uv run git-cliff --tag v$version -o CHANGELOG.md`
-6. Commit: `git add pyproject.toml CHANGELOG.md && git commit -m "release: $version"`
+5. Generate the changelog (requires `gh` auth for PR links and author attribution):
+   `GITHUB_TOKEN=$(gh auth token) uv run git-cliff --tag v$version --github-repo xorq-labs/xorq-style -o CHANGELOG.md`
+6. Commit: `git add pyproject.toml uv.lock CHANGELOG.md && git commit -m "release: $version"`
 7. Open a PR and wait for CI to pass:
    `git push --set-upstream origin release-$version && gh pr create --fill`
 8. Squash and merge the PR: `gh pr merge --squash`
 9. Tag the updated main and push: `git fetch && git tag v$version origin/main && git push --tags`
-10. The `v*` tag triggers the [publish workflow](.github/workflows/publish.yml), which builds and publishes to PyPI via Trusted Publishing.
+10. Clean up: `git switch main && git pull && git branch -d release-$version`
+11. The `v*` tag triggers the [publish workflow](.github/workflows/publish.yml), which builds and publishes to PyPI via Trusted Publishing.
