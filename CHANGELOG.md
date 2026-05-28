@@ -5,11 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-05-28
+### Details
+#### Changed
+- Improve release flow and hook documentation by @dlovell in [#10](https://github.com/xorq-labs/xorq-style/pull/10)
+
+#### Fixed
+- Write hook violations to stderr so Claude Code displays them by @dlovell in [#11](https://github.com/xorq-labs/xorq-style/pull/11)
+
 ## [0.1.2] - 2026-05-25
 ### Details
 #### Changed
 - Simplify release flow, update uv.lock by @dlovell in [#7](https://github.com/xorq-labs/xorq-style/pull/7)
-- 0.1.2
+- 0.1.2 by @dlovell in [#9](https://github.com/xorq-labs/xorq-style/pull/9)
 
 #### Fixed
 - Use documented stdin payload for Claude Code hooks by @dlovell in [#8](https://github.com/xorq-labs/xorq-style/pull/8)
