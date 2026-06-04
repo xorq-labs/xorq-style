@@ -68,6 +68,7 @@ class RuleId(StrEnum):
     TYPE_ANNOTATIONS = "type-annotations"
     ATTRS_MUTABLE_DEFAULT = "attrs-mutable-default"
     PROTECTED_ACCESS = "protected-access"
+    PYTEST_PARAM_ID = "pytest-param-id"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -89,6 +90,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.TYPE_ANNOTATIONS: "Functions must have type annotations",
         RuleId.ATTRS_MUTABLE_DEFAULT: "No mutable defaults in attrs fields (use factory=)",
         RuleId.PROTECTED_ACCESS: "No protected member access on third-party objects",
+        RuleId.PYTEST_PARAM_ID: "Parametrize args must use pytest.param with id=",
     }
 )
 
@@ -554,6 +556,60 @@ class ProtectedAccessRule:
                     )
 
 
+class PytestParamIdRule:
+    rule = RuleId.PYTEST_PARAM_ID
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            if not isinstance(node, ast.Call):
+                continue
+            match node.func:
+                case ast.Attribute(
+                    attr="parametrize",
+                    value=ast.Attribute(attr="mark", value=ast.Name(id="pytest")),
+                ):
+                    pass
+                case _:
+                    continue
+            if len(node.args) < 2:
+                continue
+            arg_list = node.args[1]
+            if not isinstance(arg_list, ast.List | ast.Tuple):
+                continue
+            for elt in arg_list.elts:
+                if not self._is_pytest_param(elt):
+                    yield ctx.violation(
+                        elt.lineno,
+                        self.rule,
+                        "parametrize arg should use pytest.param(..., id=...)",
+                    )
+                elif isinstance(elt, ast.Call) and not self._has_id_keyword(elt):
+                    yield ctx.violation(
+                        elt.lineno,
+                        self.rule,
+                        "pytest.param() missing id= keyword",
+                    )
+
+    @staticmethod
+    def _is_pytest_param(node: ast.AST) -> bool:
+        match node:
+            case ast.Call(func=ast.Attribute(attr="param", value=ast.Name(id="pytest"))):
+                return True
+            case ast.Call(func=ast.Name(id="param")):
+                return True
+            case _:
+                return False
+
+    @staticmethod
+    def _has_id_keyword(node: ast.Call) -> bool:
+        return any(kw.arg == "id" for kw in node.keywords)
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -570,6 +626,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     TypeAnnotationsRule(),
     AttrsMutableDefaultRule(),
     ProtectedAccessRule(),
+    PytestParamIdRule(),
 )
 
 
