@@ -737,6 +737,73 @@ def test_attrs_ib_mutable_default(tmp_py: _WritePy) -> None:
     assert "attrs-mutable-default" in _rules(check(path))
 
 
+# ---- protected-access ----
+
+
+def test_protected_access_on_object(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        obj._internal
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+def test_protected_access_self_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                self._internal
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_cls_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            @classmethod
+            def bar(cls) -> None:
+                cls._internal
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_dunder_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        obj.__class__
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_in_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        obj._internal
+        """,
+        name="test_example.py",
+    )
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_name_mangled(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        obj.__private
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+def test_protected_access_chained(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        foo.bar._internal
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
 # ---- disable ----
 
 
