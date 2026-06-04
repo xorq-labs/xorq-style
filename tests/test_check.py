@@ -653,6 +653,90 @@ def test_type_annotations_async_function(tmp_py: _WritePy) -> None:
     assert "return" in vs[0].msg
 
 
+# ---- attrs-mutable-default ----
+
+
+def test_attrs_mutable_default_list_literal(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=[])
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_dict_literal(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default={})
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_list_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=list())
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_dict_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=dict())
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_set_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=set())
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_factory_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(factory=list)
+    """)
+    assert "attrs-mutable-default" not in _rules(check(path))
+
+
+def test_attrs_immutable_default_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=None)
+    """)
+    assert "attrs-mutable-default" not in _rules(check(path))
+
+
+def test_attrs_attrib_mutable_default(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import attr
+        x = attr.attrib(default=[])
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_ib_mutable_default(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import attr
+        x = attr.ib(default={})
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
 # ---- disable ----
 
 
