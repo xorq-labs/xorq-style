@@ -586,6 +586,94 @@ def test_type_annotations_async_function(tmp_py: _WritePy) -> None:
     assert "return" in vs[0].msg
 
 
+# ---- pytest-param-id ----
+
+
+def test_pytest_param_bare_values(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [1, 2, 3])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_bare_tuples(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])
+        def test_foo(x: int, y: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_with_id_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1, id="one")])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" not in _rules(check(path))
+
+
+def test_pytest_param_without_id(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1)])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_in_non_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [1, 2, 3])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="mod.py",
+    )
+    assert "pytest-param-id" not in _rules(check(path))
+
+
+def test_pytest_param_mixed(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1, id="one"), 2])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-param-id"]
+    assert len(vs) == 1
+
+
 # ---- disable ----
 
 
