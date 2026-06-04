@@ -69,6 +69,7 @@ class RuleId(StrEnum):
     ATTRS_MUTABLE_DEFAULT = "attrs-mutable-default"
     PROTECTED_ACCESS = "protected-access"
     PYTEST_PARAM_ID = "pytest-param-id"
+    STDLIB_LOGGING = "stdlib-logging"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -91,6 +92,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.ATTRS_MUTABLE_DEFAULT: "No mutable defaults in attrs fields (use factory=)",
         RuleId.PROTECTED_ACCESS: "No protected member access on third-party objects",
         RuleId.PYTEST_PARAM_ID: "Parametrize args must use pytest.param with id=",
+        RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
     }
 )
 
@@ -610,6 +612,38 @@ class PytestParamIdRule:
         return any(kw.arg == "id" for kw in node.keywords)
 
 
+class StdlibLoggingRule:
+    rule = RuleId.STDLIB_LOGGING
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, parents in ctx.walked:
+            if _in_type_checking(parents):
+                continue
+            match node:
+                case ast.Import() | ast.ImportFrom() if "logging" in _top_modules(node):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "stdlib logging import (use structlog instead)",
+                    )
+                case ast.Call(
+                    func=ast.Attribute(
+                        attr="getLogger",
+                        value=ast.Name(id="logging"),
+                    )
+                ):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "logging.getLogger() call (use structlog instead)",
+                    )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -627,6 +661,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     AttrsMutableDefaultRule(),
     ProtectedAccessRule(),
     PytestParamIdRule(),
+    StdlibLoggingRule(),
 )
 
 
