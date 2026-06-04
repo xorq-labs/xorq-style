@@ -65,6 +65,7 @@ class RuleId(StrEnum):
     EXCEPTION_HIERARCHY = "exception-hierarchy"
     PRINT = "print"
     TYPE_ANNOTATIONS = "type-annotations"
+    ATTRS_MUTABLE_DEFAULT = "attrs-mutable-default"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -81,6 +82,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.EXCEPTION_HIERARCHY: "Custom exceptions must inherit from XorqError",
         RuleId.PRINT: "No bare print() in library code (use logging/click.echo)",
         RuleId.TYPE_ANNOTATIONS: "Functions must have type annotations",
+        RuleId.ATTRS_MUTABLE_DEFAULT: "No mutable defaults in attrs fields (use factory=)",
     }
 )
 
@@ -441,6 +443,55 @@ class TypeAnnotationsRule:
                         )
 
 
+_MUTABLE_CALL_NAMES = frozenset({"list", "dict", "set"})
+
+_ATTRS_FIELD_FUNCS = frozenset({"field", "attrib", "ib"})
+
+
+def _is_mutable_default(node: ast.expr) -> bool:
+    """Return True if *node* is a mutable literal or no-arg mutable constructor."""
+    if isinstance(node, ast.List | ast.Dict | ast.Set):
+        return True
+    if isinstance(node, ast.Call) and not node.args and not node.keywords:
+        match node.func:
+            case ast.Name(id=name) if name in _MUTABLE_CALL_NAMES:
+                return True
+    return False
+
+
+def _is_attrs_field_call(node: ast.Call) -> bool:
+    """Return True if *node* looks like ``field(...)``, ``attr.ib(...)``, etc."""
+    match node.func:
+        case ast.Name(id=name) if name in _ATTRS_FIELD_FUNCS:
+            return True
+        case ast.Attribute(attr=attr, value=ast.Name(id="attr" | "attrs")) if (
+            attr in _ATTRS_FIELD_FUNCS
+        ):
+            return True
+    return False
+
+
+class AttrsMutableDefaultRule:
+    rule = RuleId.ATTRS_MUTABLE_DEFAULT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            if not isinstance(node, ast.Call) or not _is_attrs_field_call(node):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "default" and _is_mutable_default(kw.value):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "mutable default in attrs field (use factory= instead)",
+                    )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -454,6 +505,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     ExceptionHierarchyRule(),
     PrintRule(),
     TypeAnnotationsRule(),
+    AttrsMutableDefaultRule(),
 )
 
 
