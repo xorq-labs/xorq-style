@@ -65,6 +65,7 @@ class RuleId(StrEnum):
     EXCEPTION_HIERARCHY = "exception-hierarchy"
     PRINT = "print"
     TYPE_ANNOTATIONS = "type-annotations"
+    STDLIB_LOGGING = "stdlib-logging"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -81,6 +82,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.EXCEPTION_HIERARCHY: "Custom exceptions must inherit from XorqError",
         RuleId.PRINT: "No bare print() in library code (use logging/click.echo)",
         RuleId.TYPE_ANNOTATIONS: "Functions must have type annotations",
+        RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
     }
 )
 
@@ -441,6 +443,38 @@ class TypeAnnotationsRule:
                         )
 
 
+class StdlibLoggingRule:
+    rule = RuleId.STDLIB_LOGGING
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, parents in ctx.walked:
+            if _in_type_checking(parents):
+                continue
+            match node:
+                case ast.Import() | ast.ImportFrom() if "logging" in _top_modules(node):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "stdlib logging import (use structlog instead)",
+                    )
+                case ast.Call(
+                    func=ast.Attribute(
+                        attr="getLogger",
+                        value=ast.Name(id="logging"),
+                    )
+                ):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "logging.getLogger() call (use structlog instead)",
+                    )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -454,6 +488,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     ExceptionHierarchyRule(),
     PrintRule(),
     TypeAnnotationsRule(),
+    StdlibLoggingRule(),
 )
 
 

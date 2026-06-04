@@ -586,6 +586,64 @@ def test_type_annotations_async_function(tmp_py: _WritePy) -> None:
     assert "return" in vs[0].msg
 
 
+# ---- stdlib-logging ----
+
+
+def test_stdlib_logging_import(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_from_import(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from logging import getLogger
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_getlogger_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import logging
+        logger: logging.Logger = logging.getLogger(__name__)
+    """)
+    vs = [v for v in check(path) if v.rule == "stdlib-logging"]
+    assert any("getLogger" in v.msg for v in vs)
+
+
+def test_stdlib_logging_in_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import logging
+        """,
+        name="test_example.py",
+    )
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_structlog_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import structlog
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
 # ---- disable ----
 
 
