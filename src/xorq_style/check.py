@@ -63,6 +63,7 @@ class RuleId(StrEnum):
     DATACLASSES = "dataclasses"
     CACHE_METHOD = "cache-method"
     EXCEPTION_HIERARCHY = "exception-hierarchy"
+    REDUNDANT_IMPORT = "redundant-import"
     PRINT = "print"
     TYPE_ANNOTATIONS = "type-annotations"
 
@@ -79,6 +80,9 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.DATACLASSES: "No dataclasses (use attrs)",
         RuleId.CACHE_METHOD: "No @functools.cache/lru_cache on methods (leaks memory via self)",
         RuleId.EXCEPTION_HIERARCHY: "Custom exceptions must inherit from XorqError",
+        RuleId.REDUNDANT_IMPORT: (
+            "No redundant deferred imports (module already imported at top level)"
+        ),
         RuleId.PRINT: "No bare print() in library code (use logging/click.echo)",
         RuleId.TYPE_ANNOTATIONS: "Functions must have type annotations",
     }
@@ -237,6 +241,39 @@ class DeferredStdlibRule:
                         node.lineno,
                         self.rule,
                         f"deferred stdlib import `{m}` (move to top of file)",
+                    )
+
+
+class RedundantImportRule:
+    rule = RuleId.REDUNDANT_IMPORT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        toplevel_modules: set[str] = set()
+        for node, parents in ctx.walked:
+            if not isinstance(node, ast.Import | ast.ImportFrom):
+                continue
+            if _in_function(parents) or _in_type_checking(parents):
+                continue
+            toplevel_modules.update(_top_modules(node))
+
+        for node, parents in ctx.walked:
+            if (
+                not isinstance(node, ast.Import | ast.ImportFrom)
+                or not _in_function(parents)
+                or _in_type_checking(parents)
+            ):
+                continue
+            for m in _top_modules(node):
+                if m in toplevel_modules:
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"redundant deferred import `{m}` (already imported at top level)",
                     )
 
 
@@ -447,6 +484,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     TestClassRule(),
     DeferredImportTestRule(),
     DeferredStdlibRule(),
+    RedundantImportRule(),
     OsEnvironRule(),
     OsPathRule(),
     DataclassesRule(),

@@ -216,6 +216,73 @@ def test_deferred_stdlib_in_type_checking(tmp_py: _WritePy) -> None:
     assert "deferred-stdlib" not in _rules(check(path))
 
 
+# ---- redundant-import ----
+
+
+def test_redundant_import_same_module(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import pandas
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_from_variant(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from pandas import DataFrame
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_top_import_deferred_from(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import pandas
+        def foo() -> None:
+            from pandas import DataFrame
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_no_overlap(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import json
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
+def test_redundant_import_deferred_in_type_checking(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import pandas
+        from typing import TYPE_CHECKING
+        def foo() -> None:
+            if TYPE_CHECKING:
+                import pandas
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
+def test_redundant_import_toplevel_in_type_checking(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            import pandas
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
 # ---- os-environ ----
 
 
