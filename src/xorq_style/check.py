@@ -65,6 +65,7 @@ class RuleId(StrEnum):
     EXCEPTION_HIERARCHY = "exception-hierarchy"
     PRINT = "print"
     TYPE_ANNOTATIONS = "type-annotations"
+    PROTECTED_ACCESS = "protected-access"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -81,6 +82,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.EXCEPTION_HIERARCHY: "Custom exceptions must inherit from XorqError",
         RuleId.PRINT: "No bare print() in library code (use logging/click.echo)",
         RuleId.TYPE_ANNOTATIONS: "Functions must have type annotations",
+        RuleId.PROTECTED_ACCESS: "No protected member access on third-party objects",
     }
 )
 
@@ -441,6 +443,29 @@ class TypeAnnotationsRule:
                         )
 
 
+class ProtectedAccessRule:
+    rule = RuleId.PROTECTED_ACCESS
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.Attribute(attr=attr, value=value) if attr.startswith("_") and not (
+                    attr.startswith("__") and attr.endswith("__")
+                ):
+                    if isinstance(value, ast.Name) and value.id in ("self", "cls"):
+                        continue
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"protected member access `.{attr}` on external object",
+                    )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -454,6 +479,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     ExceptionHierarchyRule(),
     PrintRule(),
     TypeAnnotationsRule(),
+    ProtectedAccessRule(),
 )
 
 
