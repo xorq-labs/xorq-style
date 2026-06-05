@@ -701,6 +701,15 @@ def test_attrs_mutable_default_set_call(tmp_py: _WritePy) -> None:
     assert "attrs-mutable-default" in _rules(check(path))
 
 
+def test_attrs_mutable_default_set_literal(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default={1, 2})
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
 def test_attrs_factory_ok(tmp_py: _WritePy) -> None:
     path = tmp_py("""\
         from __future__ import annotations
@@ -804,6 +813,46 @@ def test_protected_access_chained(tmp_py: _WritePy) -> None:
     assert "protected-access" in _rules(check(path))
 
 
+def test_protected_access_super_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                super()._bar()
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_super_with_args_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                super(Foo, self)._bar()
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_dunder_method_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def __eq__(self, other: object) -> bool:
+                return other._x == self._x
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_non_dunder_method_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def compare(self, other: object) -> bool:
+                return other._x == self._x
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
 # ---- pytest-param-id ----
 
 
@@ -877,6 +926,20 @@ def test_pytest_param_in_non_test_file_ok(tmp_py: _WritePy) -> None:
     assert "pytest-param-id" not in _rules(check(path))
 
 
+def test_pytest_param_indirect_still_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [1, 2], indirect=True)
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
 def test_pytest_param_mixed(tmp_py: _WritePy) -> None:
     path = tmp_py(
         """\
@@ -890,6 +953,65 @@ def test_pytest_param_mixed(tmp_py: _WritePy) -> None:
     )
     vs = [v for v in check(path) if v.rule == "pytest-param-id"]
     assert len(vs) == 1
+
+
+# ---- pytest-mark-qualify ----
+
+
+def test_pytest_mark_qualify_bare_mark(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pytest import mark
+        @mark.parametrize("x", [1])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" in _rules(check(path))
+
+
+def test_pytest_mark_qualify_bare_skip(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pytest import mark
+        @mark.skip(reason="wip")
+        def test_foo() -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" in _rules(check(path))
+
+
+def test_pytest_mark_qualify_qualified_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1, id="one")])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" not in _rules(check(path))
+
+
+def test_pytest_mark_qualify_non_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pytest import mark
+        @mark.parametrize("x", [1])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="mod.py",
+    )
+    assert "pytest-mark-qualify" not in _rules(check(path))
 
 
 # ---- stdlib-logging ----

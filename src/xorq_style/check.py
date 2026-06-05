@@ -69,6 +69,7 @@ class RuleId(StrEnum):
     ATTRS_MUTABLE_DEFAULT = "attrs-mutable-default"
     PROTECTED_ACCESS = "protected-access"
     PYTEST_PARAM_ID = "pytest-param-id"
+    PYTEST_MARK_QUALIFY = "pytest-mark-qualify"
     STDLIB_LOGGING = "stdlib-logging"
 
 
@@ -92,6 +93,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.ATTRS_MUTABLE_DEFAULT: "No mutable defaults in attrs fields (use factory=)",
         RuleId.PROTECTED_ACCESS: "No protected member access on third-party objects",
         RuleId.PYTEST_PARAM_ID: "Parametrize args must use pytest.param with id=",
+        RuleId.PYTEST_MARK_QUALIFY: "Use pytest.mark.X, not bare mark.X",
         RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
     }
 )
@@ -544,18 +546,42 @@ class ProtectedAccessRule:
         return tuple(self._check(ctx))
 
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
-        for node, _parents in ctx.walked:
+        for node, parents in ctx.walked:
             match node:
                 case ast.Attribute(attr=attr, value=value) if attr.startswith("_") and not (
                     attr.startswith("__") and attr.endswith("__")
                 ):
                     if isinstance(value, ast.Name) and value.id in ("self", "cls"):
                         continue
+                    if self._is_super_call(value):
+                        continue
+                    if self._in_class_dunder(parents):
+                        continue
                     yield ctx.violation(
                         node.lineno,
                         self.rule,
                         f"protected member access `.{attr}` on external object",
                     )
+
+    @staticmethod
+    def _is_super_call(node: ast.expr) -> bool:
+        match node:
+            case ast.Call(func=ast.Name(id="super")):
+                return True
+        return False
+
+    @staticmethod
+    def _in_class_dunder(parents: tuple[ast.AST, ...]) -> bool:
+        for i, p in enumerate(parents):
+            if (
+                isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef)
+                and p.name.startswith("__")
+                and p.name.endswith("__")
+                and i > 0
+                and isinstance(parents[i - 1], ast.ClassDef)
+            ):
+                return True
+        return False
 
 
 class PytestParamIdRule:
@@ -612,6 +638,25 @@ class PytestParamIdRule:
         return any(kw.arg == "id" for kw in node.keywords)
 
 
+class PytestMarkQualifyRule:
+    rule = RuleId.PYTEST_MARK_QUALIFY
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.Attribute(attr=attr, value=ast.Name(id="mark")):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"use `pytest.mark.{attr}` instead of `mark.{attr}`",
+                    )
+
+
 class StdlibLoggingRule:
     rule = RuleId.STDLIB_LOGGING
 
@@ -661,6 +706,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     AttrsMutableDefaultRule(),
     ProtectedAccessRule(),
     PytestParamIdRule(),
+    PytestMarkQualifyRule(),
     StdlibLoggingRule(),
 )
 
