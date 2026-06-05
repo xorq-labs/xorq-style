@@ -71,6 +71,7 @@ class RuleId(StrEnum):
     PYTEST_PARAM_ID = "pytest-param-id"
     PYTEST_MARK_QUALIFY = "pytest-mark-qualify"
     STDLIB_LOGGING = "stdlib-logging"
+    PYTEST_TMP_PATH = "pytest-tmp-path"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -95,6 +96,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.PYTEST_PARAM_ID: "Parametrize args must use pytest.param with id=",
         RuleId.PYTEST_MARK_QUALIFY: "Use pytest.mark.X, not bare mark.X",
         RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
+        RuleId.PYTEST_TMP_PATH: "No legacy tmpdir fixture (use tmp_path)",
     }
 )
 
@@ -689,6 +691,36 @@ class StdlibLoggingRule:
                     )
 
 
+_LEGACY_TMPDIR_FIXTURES = {"tmpdir": "tmp_path", "tmpdir_factory": "tmp_path_factory"}
+
+
+class PytestTmpPathRule:
+    rule = RuleId.PYTEST_TMP_PATH
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.FunctionDef(args=ast.arguments(args=args)):
+                    for arg in args:
+                        if (replacement := _LEGACY_TMPDIR_FIXTURES.get(arg.arg)) is not None:
+                            yield ctx.violation(
+                                arg.lineno,
+                                self.rule,
+                                f"use `{replacement}` fixture instead of legacy `{arg.arg}`",
+                            )
+                case ast.ImportFrom(module=module) if module and module.startswith("py.path"):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "py.path import (use pathlib.Path via tmp_path fixture)",
+                    )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -708,6 +740,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     PytestParamIdRule(),
     PytestMarkQualifyRule(),
     StdlibLoggingRule(),
+    PytestTmpPathRule(),
 )
 
 

@@ -1072,6 +1072,76 @@ def test_structlog_ok(tmp_py: _WritePy) -> None:
     assert "stdlib-logging" not in _rules(check(path))
 
 
+# ---- pytest-tmp-path ----
+
+
+def test_tmpdir_fixture_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 1
+    assert "tmp_path" in vs[0].msg
+
+
+def test_tmpdir_factory_fixture_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        def test_foo(tmpdir_factory) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 1
+    assert "tmp_path_factory" in vs[0].msg
+
+
+def test_tmp_path_fixture_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pathlib import Path
+        def test_foo(tmp_path: Path) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-tmp-path" not in _rules(check(path))
+
+
+def test_py_path_import_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from py.path import local
+        def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 2
+
+
+def test_tmpdir_in_non_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="mod.py",
+    )
+    assert "pytest-tmp-path" not in _rules(check(path))
+
+
 # ---- disable ----
 
 
