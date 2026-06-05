@@ -649,6 +649,14 @@ class PytestMarkQualifyRule:
         return tuple(self._check(ctx))
 
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        has_mark_import = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "pytest"
+            and any(alias.name == "mark" for alias in node.names)
+            for node, _ in ctx.walked
+        )
+        if not has_mark_import:
+            return
         for node, _parents in ctx.walked:
             match node:
                 case ast.Attribute(attr=attr, value=ast.Name(id="mark")):
@@ -705,7 +713,10 @@ class PytestTmpPathRule:
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
         for node, _parents in ctx.walked:
             match node:
-                case ast.FunctionDef(args=ast.arguments(args=args)):
+                case (
+                    ast.FunctionDef(args=ast.arguments(args=args))
+                    | ast.AsyncFunctionDef(args=ast.arguments(args=args))
+                ):
                     for arg in args:
                         if (replacement := _LEGACY_TMPDIR_FIXTURES.get(arg.arg)) is not None:
                             yield ctx.violation(
@@ -1050,11 +1061,11 @@ def _detect_shell() -> str:
 
 class _FileFallbackGroup(click.Group):
     def invoke(self, ctx: click.Context) -> object:
-        if ctx._protected_args:
-            cmd_name = ctx._protected_args[0]
+        if ctx._protected_args:  # xorq-style: disable=protected-access
+            cmd_name = ctx._protected_args[0]  # xorq-style: disable=protected-access
             if self.get_command(ctx, cmd_name) is None:
-                ctx.args = [*ctx._protected_args, *ctx.args]
-                ctx._protected_args = []
+                ctx.args = [*ctx._protected_args, *ctx.args]  # xorq-style: disable=protected-access
+                ctx._protected_args = []  # xorq-style: disable=protected-access
         return super().invoke(ctx)
 
 

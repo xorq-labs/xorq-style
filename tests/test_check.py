@@ -833,6 +833,17 @@ def test_protected_access_super_with_args_ok(tmp_py: _WritePy) -> None:
     assert "protected-access" not in _rules(check(path))
 
 
+def test_protected_access_super_ref_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                s = super()
+                s._bar()
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
 def test_protected_access_dunder_method_ok(tmp_py: _WritePy) -> None:
     path = tmp_py("""\
         from __future__ import annotations
@@ -1014,6 +1025,19 @@ def test_pytest_mark_qualify_non_test_file_ok(tmp_py: _WritePy) -> None:
     assert "pytest-mark-qualify" not in _rules(check(path))
 
 
+def test_pytest_mark_qualify_local_var_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        class mark:
+            x = 1
+        mark.x
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" not in _rules(check(path))
+
+
 # ---- stdlib-logging ----
 
 
@@ -1128,6 +1152,20 @@ def test_py_path_import_flagged(tmp_py: _WritePy) -> None:
     )
     vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
     assert len(vs) == 2
+
+
+def test_async_tmpdir_fixture_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        async def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 1
+    assert "tmp_path" in vs[0].msg
 
 
 def test_tmpdir_in_non_test_file_ok(tmp_py: _WritePy) -> None:
