@@ -63,8 +63,15 @@ class RuleId(StrEnum):
     DATACLASSES = "dataclasses"
     CACHE_METHOD = "cache-method"
     EXCEPTION_HIERARCHY = "exception-hierarchy"
+    REDUNDANT_IMPORT = "redundant-import"
     PRINT = "print"
     TYPE_ANNOTATIONS = "type-annotations"
+    ATTRS_MUTABLE_DEFAULT = "attrs-mutable-default"
+    PROTECTED_ACCESS = "protected-access"
+    PYTEST_PARAM_ID = "pytest-param-id"
+    PYTEST_MARK_QUALIFY = "pytest-mark-qualify"
+    STDLIB_LOGGING = "stdlib-logging"
+    PYTEST_TMP_PATH = "pytest-tmp-path"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -79,8 +86,17 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.DATACLASSES: "No dataclasses (use attrs)",
         RuleId.CACHE_METHOD: "No @functools.cache/lru_cache on methods (leaks memory via self)",
         RuleId.EXCEPTION_HIERARCHY: "Custom exceptions must inherit from XorqError",
+        RuleId.REDUNDANT_IMPORT: (
+            "No redundant deferred imports (module already imported at top level)"
+        ),
         RuleId.PRINT: "No bare print() in library code (use logging/click.echo)",
         RuleId.TYPE_ANNOTATIONS: "Functions must have type annotations",
+        RuleId.ATTRS_MUTABLE_DEFAULT: "No mutable defaults in attrs fields (use factory=)",
+        RuleId.PROTECTED_ACCESS: "No protected member access on third-party objects",
+        RuleId.PYTEST_PARAM_ID: "Parametrize args must use pytest.param with id=",
+        RuleId.PYTEST_MARK_QUALIFY: "Use pytest.mark.X, not bare mark.X",
+        RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
+        RuleId.PYTEST_TMP_PATH: "No legacy tmpdir fixture (use tmp_path)",
     }
 )
 
@@ -237,6 +253,39 @@ class DeferredStdlibRule:
                         node.lineno,
                         self.rule,
                         f"deferred stdlib import `{m}` (move to top of file)",
+                    )
+
+
+class RedundantImportRule:
+    rule = RuleId.REDUNDANT_IMPORT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        toplevel_modules: set[str] = set()
+        for node, parents in ctx.walked:
+            if not isinstance(node, ast.Import | ast.ImportFrom):
+                continue
+            if _in_function(parents) or _in_type_checking(parents):
+                continue
+            toplevel_modules.update(_top_modules(node))
+
+        for node, parents in ctx.walked:
+            if (
+                not isinstance(node, ast.Import | ast.ImportFrom)
+                or not _in_function(parents)
+                or _in_type_checking(parents)
+            ):
+                continue
+            for m in _top_modules(node):
+                if m in toplevel_modules:
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"redundant deferred import `{m}` (already imported at top level)",
                     )
 
 
@@ -441,12 +490,255 @@ class TypeAnnotationsRule:
                         )
 
 
+_MUTABLE_CALL_NAMES = frozenset({"list", "dict", "set"})
+
+_ATTRS_FIELD_FUNCS = frozenset({"field", "attrib", "ib"})
+
+
+def _is_mutable_default(node: ast.expr) -> bool:
+    """Return True if *node* is a mutable literal or no-arg mutable constructor."""
+    if isinstance(node, ast.List | ast.Dict | ast.Set):
+        return True
+    if isinstance(node, ast.Call) and not node.args and not node.keywords:
+        match node.func:
+            case ast.Name(id=name) if name in _MUTABLE_CALL_NAMES:
+                return True
+    return False
+
+
+def _is_attrs_field_call(node: ast.Call) -> bool:
+    """Return True if *node* looks like ``field(...)``, ``attr.ib(...)``, etc."""
+    match node.func:
+        case ast.Name(id=name) if name in _ATTRS_FIELD_FUNCS:
+            return True
+        case ast.Attribute(attr=attr, value=ast.Name(id="attr" | "attrs")) if (
+            attr in _ATTRS_FIELD_FUNCS
+        ):
+            return True
+    return False
+
+
+class AttrsMutableDefaultRule:
+    rule = RuleId.ATTRS_MUTABLE_DEFAULT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            if not isinstance(node, ast.Call) or not _is_attrs_field_call(node):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "default" and _is_mutable_default(kw.value):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "mutable default in attrs field (use factory= instead)",
+                    )
+
+
+class ProtectedAccessRule:
+    rule = RuleId.PROTECTED_ACCESS
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, parents in ctx.walked:
+            match node:
+                case ast.Attribute(attr=attr, value=value) if attr.startswith("_") and not (
+                    attr.startswith("__") and attr.endswith("__")
+                ):
+                    if isinstance(value, ast.Name) and value.id in ("self", "cls"):
+                        continue
+                    if self._is_super_call(value):
+                        continue
+                    if self._in_class_dunder(parents):
+                        continue
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"protected member access `.{attr}` on external object",
+                    )
+
+    @staticmethod
+    def _is_super_call(node: ast.expr) -> bool:
+        match node:
+            case ast.Call(func=ast.Name(id="super")):
+                return True
+        return False
+
+    @staticmethod
+    def _in_class_dunder(parents: tuple[ast.AST, ...]) -> bool:
+        for i, p in enumerate(parents):
+            if (
+                isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef)
+                and p.name.startswith("__")
+                and p.name.endswith("__")
+                and i > 0
+                and isinstance(parents[i - 1], ast.ClassDef)
+            ):
+                return True
+        return False
+
+
+class PytestParamIdRule:
+    rule = RuleId.PYTEST_PARAM_ID
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            if not isinstance(node, ast.Call):
+                continue
+            match node.func:
+                case ast.Attribute(
+                    attr="parametrize",
+                    value=ast.Attribute(attr="mark", value=ast.Name(id="pytest")),
+                ):
+                    pass
+                case _:
+                    continue
+            if len(node.args) < 2:
+                continue
+            arg_list = node.args[1]
+            if not isinstance(arg_list, ast.List | ast.Tuple):
+                continue
+            for elt in arg_list.elts:
+                if not self._is_pytest_param(elt):
+                    yield ctx.violation(
+                        elt.lineno,
+                        self.rule,
+                        "parametrize arg should use pytest.param(..., id=...)",
+                    )
+                elif isinstance(elt, ast.Call) and not self._has_id_keyword(elt):
+                    yield ctx.violation(
+                        elt.lineno,
+                        self.rule,
+                        "pytest.param() missing id= keyword",
+                    )
+
+    @staticmethod
+    def _is_pytest_param(node: ast.AST) -> bool:
+        match node:
+            case ast.Call(func=ast.Attribute(attr="param", value=ast.Name(id="pytest"))):
+                return True
+            case ast.Call(func=ast.Name(id="param")):
+                return True
+            case _:
+                return False
+
+    @staticmethod
+    def _has_id_keyword(node: ast.Call) -> bool:
+        return any(kw.arg == "id" for kw in node.keywords)
+
+
+class PytestMarkQualifyRule:
+    rule = RuleId.PYTEST_MARK_QUALIFY
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        has_mark_import = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "pytest"
+            and any(alias.name == "mark" for alias in node.names)
+            for node, _ in ctx.walked
+        )
+        if not has_mark_import:
+            return
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.Attribute(attr=attr, value=ast.Name(id="mark")):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"use `pytest.mark.{attr}` instead of `mark.{attr}`",
+                    )
+
+
+class StdlibLoggingRule:
+    rule = RuleId.STDLIB_LOGGING
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, parents in ctx.walked:
+            if _in_type_checking(parents):
+                continue
+            match node:
+                case ast.Import() | ast.ImportFrom() if "logging" in _top_modules(node):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "stdlib logging import (use structlog instead)",
+                    )
+                case ast.Call(
+                    func=ast.Attribute(
+                        attr="getLogger",
+                        value=ast.Name(id="logging"),
+                    )
+                ):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "logging.getLogger() call (use structlog instead)",
+                    )
+
+
+_LEGACY_TMPDIR_FIXTURES = {"tmpdir": "tmp_path", "tmpdir_factory": "tmp_path_factory"}
+
+
+class PytestTmpPathRule:
+    rule = RuleId.PYTEST_TMP_PATH
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case (
+                    ast.FunctionDef(args=ast.arguments(args=args))
+                    | ast.AsyncFunctionDef(args=ast.arguments(args=args))
+                ):
+                    for arg in args:
+                        if (replacement := _LEGACY_TMPDIR_FIXTURES.get(arg.arg)) is not None:
+                            yield ctx.violation(
+                                arg.lineno,
+                                self.rule,
+                                f"use `{replacement}` fixture instead of legacy `{arg.arg}`",
+                            )
+                case ast.ImportFrom(module=module) if module and module.startswith("py.path"):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        "py.path import (use pathlib.Path via tmp_path fixture)",
+                    )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
     TestClassRule(),
     DeferredImportTestRule(),
     DeferredStdlibRule(),
+    RedundantImportRule(),
     OsEnvironRule(),
     OsPathRule(),
     DataclassesRule(),
@@ -454,6 +746,12 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     ExceptionHierarchyRule(),
     PrintRule(),
     TypeAnnotationsRule(),
+    AttrsMutableDefaultRule(),
+    ProtectedAccessRule(),
+    PytestParamIdRule(),
+    PytestMarkQualifyRule(),
+    StdlibLoggingRule(),
+    PytestTmpPathRule(),
 )
 
 
@@ -763,11 +1061,11 @@ def _detect_shell() -> str:
 
 class _FileFallbackGroup(click.Group):
     def invoke(self, ctx: click.Context) -> object:
-        if ctx._protected_args:
-            cmd_name = ctx._protected_args[0]
+        if ctx._protected_args:  # xorq-style: disable=protected-access
+            cmd_name = ctx._protected_args[0]  # xorq-style: disable=protected-access
             if self.get_command(ctx, cmd_name) is None:
-                ctx.args = [*ctx._protected_args, *ctx.args]
-                ctx._protected_args = []
+                ctx.args = [*ctx._protected_args, *ctx.args]  # xorq-style: disable=protected-access
+                ctx._protected_args = []  # xorq-style: disable=protected-access
         return super().invoke(ctx)
 
 

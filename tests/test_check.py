@@ -216,6 +216,73 @@ def test_deferred_stdlib_in_type_checking(tmp_py: _WritePy) -> None:
     assert "deferred-stdlib" not in _rules(check(path))
 
 
+# ---- redundant-import ----
+
+
+def test_redundant_import_same_module(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import pandas
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_from_variant(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from pandas import DataFrame
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_top_import_deferred_from(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import pandas
+        def foo() -> None:
+            from pandas import DataFrame
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_no_overlap(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import json
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
+def test_redundant_import_deferred_in_type_checking(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import pandas
+        from typing import TYPE_CHECKING
+        def foo() -> None:
+            if TYPE_CHECKING:
+                import pandas
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
+def test_redundant_import_toplevel_in_type_checking(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            import pandas
+        def foo() -> None:
+            import pandas
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
 # ---- os-environ ----
 
 
@@ -584,6 +651,533 @@ def test_type_annotations_async_function(tmp_py: _WritePy) -> None:
     assert len(vs) == 1
     assert "x" in vs[0].msg
     assert "return" in vs[0].msg
+
+
+# ---- attrs-mutable-default ----
+
+
+def test_attrs_mutable_default_list_literal(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=[])
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_dict_literal(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default={})
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_list_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=list())
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_dict_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=dict())
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_set_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=set())
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_mutable_default_set_literal(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default={1, 2})
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_factory_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(factory=list)
+    """)
+    assert "attrs-mutable-default" not in _rules(check(path))
+
+
+def test_attrs_immutable_default_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from attrs import field
+        x = field(default=None)
+    """)
+    assert "attrs-mutable-default" not in _rules(check(path))
+
+
+def test_attrs_attrib_mutable_default(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import attr
+        x = attr.attrib(default=[])
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+def test_attrs_ib_mutable_default(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import attr
+        x = attr.ib(default={})
+    """)
+    assert "attrs-mutable-default" in _rules(check(path))
+
+
+# ---- protected-access ----
+
+
+def test_protected_access_on_object(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        obj._internal
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+def test_protected_access_self_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                self._internal
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_cls_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            @classmethod
+            def bar(cls) -> None:
+                cls._internal
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_dunder_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        obj.__class__
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_in_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        obj._internal
+        """,
+        name="test_example.py",
+    )
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_name_mangled(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        obj.__private
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+def test_protected_access_chained(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        foo.bar._internal
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+def test_protected_access_super_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                super()._bar()
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_super_with_args_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                super(Foo, self)._bar()
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_super_ref_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def bar(self) -> None:
+                s = super()
+                s._bar()
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+def test_protected_access_dunder_method_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def __eq__(self, other: object) -> bool:
+                return other._x == self._x
+    """)
+    assert "protected-access" not in _rules(check(path))
+
+
+def test_protected_access_non_dunder_method_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class Foo:
+            def compare(self, other: object) -> bool:
+                return other._x == self._x
+    """)
+    assert "protected-access" in _rules(check(path))
+
+
+# ---- pytest-param-id ----
+
+
+def test_pytest_param_bare_values(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [1, 2, 3])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_bare_tuples(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])
+        def test_foo(x: int, y: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_with_id_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1, id="one")])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" not in _rules(check(path))
+
+
+def test_pytest_param_without_id(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1)])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_in_non_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [1, 2, 3])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="mod.py",
+    )
+    assert "pytest-param-id" not in _rules(check(path))
+
+
+def test_pytest_param_indirect_still_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [1, 2], indirect=True)
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-param-id" in _rules(check(path))
+
+
+def test_pytest_param_mixed(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1, id="one"), 2])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-param-id"]
+    assert len(vs) == 1
+
+
+# ---- pytest-mark-qualify ----
+
+
+def test_pytest_mark_qualify_bare_mark(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pytest import mark
+        @mark.parametrize("x", [1])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" in _rules(check(path))
+
+
+def test_pytest_mark_qualify_bare_skip(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pytest import mark
+        @mark.skip(reason="wip")
+        def test_foo() -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" in _rules(check(path))
+
+
+def test_pytest_mark_qualify_qualified_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import pytest
+        @pytest.mark.parametrize("x", [pytest.param(1, id="one")])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" not in _rules(check(path))
+
+
+def test_pytest_mark_qualify_non_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pytest import mark
+        @mark.parametrize("x", [1])
+        def test_foo(x: int) -> None:
+            pass
+        """,
+        name="mod.py",
+    )
+    assert "pytest-mark-qualify" not in _rules(check(path))
+
+
+def test_pytest_mark_qualify_local_var_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        class mark:
+            x = 1
+        mark.x
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-mark-qualify" not in _rules(check(path))
+
+
+# ---- stdlib-logging ----
+
+
+def test_stdlib_logging_import(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_from_import(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from logging import getLogger
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_getlogger_call(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import logging
+        logger: logging.Logger = logging.getLogger(__name__)
+    """)
+    vs = [v for v in check(path) if v.rule == "stdlib-logging"]
+    assert any("getLogger" in v.msg for v in vs)
+
+
+def test_stdlib_logging_in_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import logging
+        """,
+        name="test_example.py",
+    )
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_structlog_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import structlog
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+# ---- pytest-tmp-path ----
+
+
+def test_tmpdir_fixture_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 1
+    assert "tmp_path" in vs[0].msg
+
+
+def test_tmpdir_factory_fixture_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        def test_foo(tmpdir_factory) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 1
+    assert "tmp_path_factory" in vs[0].msg
+
+
+def test_tmp_path_fixture_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from pathlib import Path
+        def test_foo(tmp_path: Path) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "pytest-tmp-path" not in _rules(check(path))
+
+
+def test_py_path_import_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from py.path import local
+        def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 2
+
+
+def test_async_tmpdir_fixture_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        async def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="test_example.py",
+    )
+    vs = [v for v in check(path) if v.rule == "pytest-tmp-path"]
+    assert len(vs) == 1
+    assert "tmp_path" in vs[0].msg
+
+
+def test_tmpdir_in_non_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        def test_foo(tmpdir) -> None:
+            pass
+        """,
+        name="mod.py",
+    )
+    assert "pytest-tmp-path" not in _rules(check(path))
 
 
 # ---- disable ----
