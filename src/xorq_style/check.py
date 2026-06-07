@@ -72,6 +72,7 @@ class RuleId(StrEnum):
     PYTEST_MARK_QUALIFY = "pytest-mark-qualify"
     STDLIB_LOGGING = "stdlib-logging"
     PYTEST_TMP_PATH = "pytest-tmp-path"
+    IMPORT_ALIASING = "import-aliasing"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -97,6 +98,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.PYTEST_MARK_QUALIFY: "Use pytest.mark.X, not bare mark.X",
         RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
         RuleId.PYTEST_TMP_PATH: "No legacy tmpdir fixture (use tmp_path)",
+        RuleId.IMPORT_ALIASING: "No suspicious import aliasing (e.g. import x as _x)",
     }
 )
 
@@ -732,6 +734,32 @@ class PytestTmpPathRule:
                     )
 
 
+class ImportAliasingRule:
+    rule = RuleId.IMPORT_ALIASING
+
+    _PREFIXES = ("_", "orig_", "_orig_", "original_", "base_", "real_")
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.Import(names=names) | ast.ImportFrom(names=names):
+                    for alias in names:
+                        if alias.asname is None:
+                            continue
+                        base = alias.name.rsplit(".", 1)[-1]
+                        if any(alias.asname == f"{prefix}{base}" for prefix in self._PREFIXES):
+                            yield ctx.violation(
+                                node.lineno,
+                                self.rule,
+                                f"suspicious import alias `{alias.name} as {alias.asname}`",
+                            )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -752,6 +780,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     PytestMarkQualifyRule(),
     StdlibLoggingRule(),
     PytestTmpPathRule(),
+    ImportAliasingRule(),
 )
 
 

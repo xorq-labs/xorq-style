@@ -1180,6 +1180,59 @@ def test_tmpdir_in_non_test_file_ok(tmp_py: _WritePy) -> None:
     assert "pytest-tmp-path" not in _rules(check(path))
 
 
+# ---- import-aliasing ----
+
+
+def test_import_alias_underscore_prefix(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os as _os\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_from_import_alias_underscore_prefix(tmp_py: _WritePy) -> None:
+    path = tmp_py("from pathlib import Path as _Path\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_import_alias_orig_prefix(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os as orig_os\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_import_alias_original_prefix(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os as original_os\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_import_alias_base_prefix(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os as base_os\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_import_alias_real_prefix(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os as real_os\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_import_alias_dotted_module(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os.path as _path\n")
+    assert "import-aliasing" in _rules(check(path))
+
+
+def test_import_no_alias_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("import os\n")
+    assert "import-aliasing" not in _rules(check(path))
+
+
+def test_import_legitimate_alias_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("import numpy as np\n")
+    assert "import-aliasing" not in _rules(check(path))
+
+
+def test_from_import_no_alias_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("from pathlib import Path\n")
+    assert "import-aliasing" not in _rules(check(path))
+
+
 # ---- disable ----
 
 
