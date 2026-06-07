@@ -1152,6 +1152,14 @@ def main(
 
 
 @main.command()
+def version() -> None:
+    """Show the xorq-style version."""
+    from importlib.metadata import version as pkg_version  # xorq-style: disable=deferred-stdlib
+
+    click.echo(f"xorq-check-style {pkg_version('xorq-style')}")
+
+
+@main.command()
 @click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]), required=False)
 def completion(shell: str | None) -> None:
     """Output shell completion script.
