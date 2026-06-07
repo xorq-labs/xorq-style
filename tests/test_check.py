@@ -283,6 +283,36 @@ def test_redundant_import_toplevel_in_type_checking(tmp_py: _WritePy) -> None:
     assert "redundant-import" not in _rules(check(path))
 
 
+def test_redundant_import_submodule_not_redundant(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import xorq
+        def foo() -> None:
+            from xorq.catalog.zip_utils import extract_build_zip_context
+    """)
+    assert "redundant-import" not in _rules(check(path))
+
+
+def test_redundant_import_submodule_same_path(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from xorq.catalog.zip_utils import extract_build_zip_context
+        def foo() -> None:
+            from xorq.catalog.zip_utils import extract_build_zip_context
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
+def test_redundant_import_deeper_top_level(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import xorq.catalog.zip_utils
+        def foo() -> None:
+            import xorq
+    """)
+    assert "redundant-import" in _rules(check(path))
+
+
 # ---- os-environ ----
 
 
