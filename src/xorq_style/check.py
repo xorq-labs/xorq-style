@@ -273,7 +273,7 @@ class RedundantImportRule:
                 continue
             if _in_function(parents) or _in_type_checking(parents):
                 continue
-            toplevel_modules.update(_top_modules(node))
+            toplevel_modules.update(_full_module_paths(node))
 
         for node, parents in ctx.walked:
             if (
@@ -282,8 +282,8 @@ class RedundantImportRule:
                 or _in_type_checking(parents)
             ):
                 continue
-            for m in _top_modules(node):
-                if m in toplevel_modules:
+            for m in _full_module_paths(node):
+                if any(t == m or t.startswith(m + ".") for t in toplevel_modules):
                     yield ctx.violation(
                         node.lineno,
                         self.rule,
@@ -868,6 +868,16 @@ def _top_modules(node: ast.AST) -> tuple[str, ...]:
             return tuple(a.name.split(".")[0] for a in node.names)
         case ast.ImportFrom(module=module) if module:
             return (module.split(".")[0],)
+        case _:
+            return ()
+
+
+def _full_module_paths(node: ast.AST) -> tuple[str, ...]:
+    match node:
+        case ast.Import():
+            return tuple(a.name for a in node.names)
+        case ast.ImportFrom(module=module) if module:
+            return (module,)
         case _:
             return ()
 
