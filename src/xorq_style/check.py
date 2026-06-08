@@ -27,6 +27,7 @@ else:
 
 
 from functools import cache
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
@@ -1154,8 +1155,6 @@ def main(
 @main.command()
 def version() -> None:
     """Show the xorq-style version."""
-    from importlib.metadata import version as pkg_version  # xorq-style: disable=deferred-stdlib
-
     click.echo(f"xorq-check-style {pkg_version('xorq-style')}")
 
 
