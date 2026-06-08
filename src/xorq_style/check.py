@@ -27,6 +27,7 @@ else:
 
 
 from functools import cache
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
@@ -1149,6 +1150,12 @@ def main(
     all_errors = tuple(error for f in files for error in check(f, disabled=disable, config=config))
     if all_errors:
         _print_and_exit(all_errors)
+
+
+@main.command()
+def version() -> None:
+    """Show the xorq-style version."""
+    click.echo(f"xorq-check-style {pkg_version('xorq-style')}")
 
 
 @main.command()
