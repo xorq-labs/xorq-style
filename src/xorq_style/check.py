@@ -16,16 +16,6 @@ import os
 import sys
 import types
 from dataclasses import dataclass  # xorq-style: disable=dataclasses
-
-if sys.version_info >= (3, 11):
-    from enum import StrEnum
-else:
-    import enum
-
-    class StrEnum(str, enum.Enum):
-        pass
-
-
 from functools import cache
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -33,6 +23,8 @@ from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 import click
 from click.shell_completion import get_completion_class
+
+from xorq_style.enums import RuleId
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -51,29 +43,6 @@ __all__ = [
     "load_config",
     "main",
 ]
-
-
-class RuleId(StrEnum):
-    RELATIVE_IMPORT = "relative-import"
-    TEST_CLASS = "test-class"
-    DEFERRED_IMPORT_TEST = "deferred-import-test"
-    DEFERRED_STDLIB = "deferred-stdlib"
-    OS_ENVIRON = "os-environ"
-    FUTURE_ANNOTATIONS = "future-annotations"
-    OS_PATH = "os-path"
-    DATACLASSES = "dataclasses"
-    CACHE_METHOD = "cache-method"
-    EXCEPTION_HIERARCHY = "exception-hierarchy"
-    REDUNDANT_IMPORT = "redundant-import"
-    PRINT = "print"
-    TYPE_ANNOTATIONS = "type-annotations"
-    ATTRS_MUTABLE_DEFAULT = "attrs-mutable-default"
-    PROTECTED_ACCESS = "protected-access"
-    PYTEST_PARAM_ID = "pytest-param-id"
-    PYTEST_MARK_QUALIFY = "pytest-mark-qualify"
-    STDLIB_LOGGING = "stdlib-logging"
-    PYTEST_TMP_PATH = "pytest-tmp-path"
-    IMPORT_ALIASING = "import-aliasing"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -100,6 +69,10 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.STDLIB_LOGGING: "No stdlib logging (use structlog)",
         RuleId.PYTEST_TMP_PATH: "No legacy tmpdir fixture (use tmp_path)",
         RuleId.IMPORT_ALIASING: "No suspicious import aliasing (e.g. import x as _x)",
+        RuleId.STRENUM_COMPAT: "No direct StrEnum import (use compat shim)",
+        RuleId.ENUM_PLACEMENT: "Enum classes must be defined in enums.py",
+        RuleId.EXCEPTION_PLACEMENT: "Exception classes must be defined in exceptions.py",
+        RuleId.LEAF_ENUM_IMPORT: "enums.py modules must only import from stdlib and compat",
     }
 )
 
@@ -129,6 +102,7 @@ class Config:
     environ_allow_paths: tuple[str, ...] = ()
     exception_base_class: str = "XorqError"
     print_allow_files: frozenset[str] = frozenset()
+    strenum_compat_module: str = "xorq.common.compat"
 
 
 @dataclass(frozen=True)
@@ -761,6 +735,117 @@ class ImportAliasingRule:
                             )
 
 
+class StrEnumCompatRule:
+    rule = RuleId.STRENUM_COMPAT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or ctx.path.name == "compat.py":
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        compat_module = ctx.config.strenum_compat_module
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.ImportFrom(module="enum" | "strenum", names=names):
+                    if any(alias.name == "StrEnum" for alias in names):
+                        yield ctx.violation(
+                            node.lineno,
+                            self.rule,
+                            f"direct StrEnum import (use `from {compat_module} import StrEnum`)",
+                        )
+                case ast.Import(names=names):
+                    for alias in names:
+                        if alias.name == "strenum":
+                            yield ctx.violation(
+                                node.lineno,
+                                self.rule,
+                                "direct strenum import"
+                                f" (use `from {compat_module} import StrEnum`)",
+                            )
+
+
+_ENUM_BASES = frozenset({"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"})
+
+
+def _has_enum_base(bases: list[ast.expr]) -> bool:
+    for base in bases:
+        match base:
+            case ast.Name(id=name) if name in _ENUM_BASES:
+                return True
+            case ast.Attribute(attr=attr) if attr in _ENUM_BASES:
+                return True
+    return False
+
+
+class EnumPlacementRule:
+    rule = RuleId.ENUM_PLACEMENT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or _is_enums_module(ctx.path) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.ClassDef(name=name, bases=bases) if bases and _has_enum_base(bases):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"enum class `{name}` should be defined in an enums.py module",
+                    )
+
+
+class ExceptionPlacementRule:
+    rule = RuleId.EXCEPTION_PLACEMENT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or _is_exceptions_module(ctx.path) or ctx.is_test:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        for node, _parents in ctx.walked:
+            match node:
+                case ast.ClassDef(name=name, bases=bases) if bases and (
+                    name.endswith("Error") or name.endswith("Exception")
+                ):
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"exception class `{name}` should be defined in an exceptions.py module",
+                    )
+
+
+class LeafEnumImportRule:
+    rule = RuleId.LEAF_ENUM_IMPORT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not _is_enums_module(ctx.path):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        compat_module = ctx.config.strenum_compat_module
+        for node, parents in ctx.walked:
+            if not isinstance(node, ast.Import | ast.ImportFrom):
+                continue
+            if _in_type_checking(parents):
+                continue
+            top_mods = _top_modules(node)
+            if all(m == "__future__" or m in STDLIB for m in top_mods):
+                continue
+            if any(fp == compat_module for fp in _full_module_paths(node)):
+                continue
+            display = ", ".join(_full_module_paths(node)) or "?"
+            yield ctx.violation(
+                node.lineno,
+                self.rule,
+                f"enums.py must be a leaf module (`{display}` is not stdlib or compat)",
+            )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -782,6 +867,10 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     StdlibLoggingRule(),
     PytestTmpPathRule(),
     ImportAliasingRule(),
+    StrEnumCompatRule(),
+    EnumPlacementRule(),
+    ExceptionPlacementRule(),
+    LeafEnumImportRule(),
 )
 
 
@@ -820,11 +909,15 @@ def load_config(start: Path | None = None) -> Config:
     print_cfg = tool.get("print", {})
     print_allow = frozenset(print_cfg.get("allow-files", ()))
 
+    strenum_cfg = tool.get("strenum-compat", {})
+    strenum_module = strenum_cfg.get("module", "xorq.common.compat")
+
     return Config(
         disabled=disabled,
         environ_allow_paths=environ_allow,
         exception_base_class=base_class,
         print_allow_files=print_allow,
+        strenum_compat_module=strenum_module,
     )
 
 
@@ -838,6 +931,10 @@ def _is_in_class(parents: tuple[ast.AST, ...]) -> bool:
 
 def _is_exceptions_module(path: Path) -> bool:
     return path.name == "exceptions.py"
+
+
+def _is_enums_module(path: Path) -> bool:
+    return path.name == "enums.py"
 
 
 def _walk_with_parents(
