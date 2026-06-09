@@ -1263,6 +1263,211 @@ def test_from_import_no_alias_ok(tmp_py: _WritePy) -> None:
     assert "import-aliasing" not in _rules(check(path))
 
 
+# ---- strenum-compat ----
+
+
+def test_strenum_compat_from_enum(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from enum import StrEnum
+    """)
+    assert "strenum-compat" in _rules(check(path))
+
+
+def test_strenum_compat_from_strenum(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from strenum import StrEnum
+    """)
+    assert "strenum-compat" in _rules(check(path))
+
+
+def test_strenum_compat_import_strenum(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import strenum
+    """)
+    assert "strenum-compat" in _rules(check(path))
+
+
+def test_strenum_compat_from_compat_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from xorq.common.compat import StrEnum
+    """)
+    assert "strenum-compat" not in _rules(check(path))
+
+
+def test_strenum_compat_in_compat_module_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from enum import StrEnum
+        """,
+        name="compat.py",
+    )
+    assert "strenum-compat" not in _rules(check(path))
+
+
+def test_strenum_compat_other_enum_import_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from enum import IntEnum
+    """)
+    assert "strenum-compat" not in _rules(check(path))
+
+
+def test_strenum_compat_custom_module(tmp_py: _WritePy) -> None:
+    config = Config(strenum_compat_module="myproject.compat")
+    path = tmp_py("""\
+        from __future__ import annotations
+        from enum import StrEnum
+    """)
+    vs = [v for v in check(path, config=config) if v.rule == "strenum-compat"]
+    assert len(vs) == 1
+    assert "myproject.compat" in vs[0].msg
+
+
+# ---- enum-placement ----
+
+
+def test_enum_placement_in_regular_module(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from xorq.common.compat import StrEnum
+        class MyEnum(StrEnum):
+            A = "a"
+    """)
+    assert "enum-placement" in _rules(check(path))
+
+
+def test_enum_placement_in_enums_module_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from xorq.common.compat import StrEnum
+        class MyEnum(StrEnum):
+            A = "a"
+        """,
+        name="enums.py",
+    )
+    assert "enum-placement" not in _rules(check(path))
+
+
+def test_enum_placement_in_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from xorq.common.compat import StrEnum
+        class MyEnum(StrEnum):
+            A = "a"
+        """,
+        name="test_example.py",
+    )
+    assert "enum-placement" not in _rules(check(path))
+
+
+def test_enum_placement_int_enum(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from enum import IntEnum
+        class Priority(IntEnum):
+            LOW = 1
+    """)
+    assert "enum-placement" in _rules(check(path))
+
+
+def test_enum_placement_dotted_base(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        import enum
+        class MyEnum(enum.StrEnum):
+            A = "a"
+    """)
+    assert "enum-placement" in _rules(check(path))
+
+
+def test_enum_placement_no_base_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class MyClass:
+            pass
+    """)
+    assert "enum-placement" not in _rules(check(path))
+
+
+def test_enum_placement_non_enum_base_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class MyClass(SomeBase):
+            pass
+    """)
+    assert "enum-placement" not in _rules(check(path))
+
+
+# ---- exception-placement ----
+
+
+def test_exception_placement_in_regular_module(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class MyError(ValueError):
+            pass
+    """)
+    assert "exception-placement" in _rules(check(path))
+
+
+def test_exception_placement_in_exceptions_module_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        class MyError(ValueError):
+            pass
+        """,
+        name="exceptions.py",
+    )
+    assert "exception-placement" not in _rules(check(path))
+
+
+def test_exception_placement_in_test_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        class MyError(ValueError):
+            pass
+        """,
+        name="test_example.py",
+    )
+    assert "exception-placement" not in _rules(check(path))
+
+
+def test_exception_placement_project_base(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class MyError(XorqError):
+            pass
+    """)
+    assert "exception-placement" in _rules(check(path))
+
+
+def test_exception_placement_exception_suffix(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class MyException(RuntimeError):
+            pass
+    """)
+    assert "exception-placement" in _rules(check(path))
+
+
+def test_exception_placement_non_exception_class_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        class MyService(BaseService):
+            pass
+    """)
+    assert "exception-placement" not in _rules(check(path))
+
+
 # ---- disable ----
 
 
