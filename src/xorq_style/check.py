@@ -77,6 +77,7 @@ class RuleId(StrEnum):  # xorq-style: disable=enum-placement
     STRENUM_COMPAT = "strenum-compat"
     ENUM_PLACEMENT = "enum-placement"
     EXCEPTION_PLACEMENT = "exception-placement"
+    LEAF_ENUM_IMPORT = "leaf-enum-import"
 
 
 RULES: Mapping[RuleId, str] = types.MappingProxyType(
@@ -106,6 +107,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.STRENUM_COMPAT: "No direct StrEnum import (use compat shim)",
         RuleId.ENUM_PLACEMENT: "Enum classes must be defined in enums.py",
         RuleId.EXCEPTION_PLACEMENT: "Exception classes must be defined in exceptions.py",
+        RuleId.LEAF_ENUM_IMPORT: "enums.py modules must only import from stdlib and compat",
     }
 )
 
@@ -851,6 +853,34 @@ class ExceptionPlacementRule:
                     )
 
 
+class LeafEnumImportRule:
+    rule = RuleId.LEAF_ENUM_IMPORT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule) or not _is_enums_module(ctx.path):
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        compat_module = ctx.config.strenum_compat_module
+        for node, parents in ctx.walked:
+            if not isinstance(node, ast.Import | ast.ImportFrom):
+                continue
+            if _in_type_checking(parents):
+                continue
+            top_mods = _top_modules(node)
+            if all(m == "__future__" or m in STDLIB for m in top_mods):
+                continue
+            if any(fp == compat_module for fp in _full_module_paths(node)):
+                continue
+            display = ", ".join(_full_module_paths(node)) or "?"
+            yield ctx.violation(
+                node.lineno,
+                self.rule,
+                f"enums.py must be a leaf module (`{display}` is not stdlib or compat)",
+            )
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -875,6 +905,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     StrEnumCompatRule(),
     EnumPlacementRule(),
     ExceptionPlacementRule(),
+    LeafEnumImportRule(),
 )
 
 

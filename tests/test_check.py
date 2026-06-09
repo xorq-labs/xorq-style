@@ -1468,6 +1468,77 @@ def test_exception_placement_non_exception_class_ok(tmp_py: _WritePy) -> None:
     assert "exception-placement" not in _rules(check(path))
 
 
+# ---- leaf-enum-import ----
+
+
+def test_leaf_enum_import_stdlib_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from enum import IntEnum
+        """,
+        name="enums.py",
+    )
+    assert "leaf-enum-import" not in _rules(check(path))
+
+
+def test_leaf_enum_import_compat_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from xorq.common.compat import StrEnum
+        """,
+        name="enums.py",
+    )
+    assert "leaf-enum-import" not in _rules(check(path))
+
+
+def test_leaf_enum_import_project_import(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from xorq.catalog.constants import SOME_CONST
+        """,
+        name="enums.py",
+    )
+    vs = [v for v in check(path) if v.rule == "leaf-enum-import"]
+    assert len(vs) == 1
+    assert "xorq.catalog.constants" in vs[0].msg
+
+
+def test_leaf_enum_import_third_party(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import attrs
+        """,
+        name="enums.py",
+    )
+    assert "leaf-enum-import" in _rules(check(path))
+
+
+def test_leaf_enum_import_non_enums_module_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from xorq.catalog.constants import SOME_CONST
+    """)
+    assert "leaf-enum-import" not in _rules(check(path))
+
+
+def test_leaf_enum_import_type_checking_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        from xorq.common.compat import StrEnum
+        if TYPE_CHECKING:
+            from xorq.vendor.ibis.expr.types import Table
+        """,
+        name="enums.py",
+    )
+    assert "leaf-enum-import" not in _rules(check(path))
+
+
 # ---- disable ----
 
 
