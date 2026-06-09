@@ -51,6 +51,9 @@ warn_unused_configs = true
 [tool.xorq-style]
 disable = []
 
+[tool.xorq-style.strenum-compat]
+module = "xorq_style.compat"
+
 [tool.xorq-style.print]
 allow-files = ["cli.py", "check.py"]
 

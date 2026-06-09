@@ -16,16 +16,6 @@ import os
 import sys
 import types
 from dataclasses import dataclass  # xorq-style: disable=dataclasses
-
-if sys.version_info >= (3, 11):
-    from enum import StrEnum  # xorq-style: disable=strenum-compat
-else:
-    import enum
-
-    class StrEnum(str, enum.Enum):  # xorq-style: disable=enum-placement
-        pass
-
-
 from functools import cache
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -33,6 +23,8 @@ from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 import click
 from click.shell_completion import get_completion_class
+
+from xorq_style.compat import StrEnum
 
 if sys.version_info >= (3, 11):
     import tomllib
