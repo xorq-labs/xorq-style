@@ -1797,7 +1797,7 @@ def test_hook_with_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     p.write_text("x = 1\n")
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="2"):
         _hook([])
 
 
