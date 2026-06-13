@@ -76,6 +76,8 @@ The `--disable` option supports tab completion for rule names, including comma-s
 | `exception-hierarchy` | Custom exceptions must inherit from XorqError |
 | `print` | No bare print() in library code (use logging/click.echo) |
 | `type-annotations` | Functions must have type annotations |
+| `unlisted-import` | Imported name not listed in target module's `__all__` |
+| `init-reexport` | Non-`__init__` module re-exports imported name via `__all__` |
 
 ## Configuration
 
@@ -93,6 +95,9 @@ base-class = "XorqError"              # expected base class (default: XorqError)
 
 [tool.xorq-style.print]
 allow-files = ["cli.py"]              # allow print() in these filenames
+
+[tool.xorq-style.unlisted-import]
+src-roots = ["python/"]               # source roots relative to pyproject.toml (default: ["src", "."])
 ```
 
 All fields are optional. The config file is discovered by walking up from the checked file's directory.
