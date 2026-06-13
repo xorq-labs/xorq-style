@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 __all__ = [
     "RULES",
     "Config",
-    "RuleId",
     "Violation",
     "check",
     "load_config",
@@ -73,6 +72,8 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.ENUM_PLACEMENT: "Enum classes must be defined in enums.py",
         RuleId.EXCEPTION_PLACEMENT: "Exception classes must be defined in exceptions.py",
         RuleId.LEAF_ENUM_IMPORT: "enums.py modules must only import from stdlib and compat",
+        RuleId.UNLISTED_IMPORT: "Imported name not listed in target module's __all__",
+        RuleId.INIT_REEXPORT: "Non-__init__ module re-exports imported name via __all__",
     }
 )
 
@@ -103,6 +104,8 @@ class Config:
     exception_base_class: str = "XorqError"
     print_allow_files: frozenset[str] = frozenset()
     strenum_compat_module: str = "xorq.common.compat"
+    project_root: Path | None = None
+    src_roots: tuple[str, ...] = ("src", ".")
 
 
 @dataclass(frozen=True)
@@ -846,6 +849,79 @@ class LeafEnumImportRule:
             )
 
 
+class UnlistedImportRule:
+    rule = RuleId.UNLISTED_IMPORT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        if ctx.config.project_root is None:
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        project_root = ctx.config.project_root
+        assert project_root is not None
+        src_roots = ctx.config.src_roots
+        if not _is_within_package(ctx.path, project_root, src_roots):
+            return
+        for node, parents in ctx.walked:
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if _in_type_checking(parents):
+                continue
+            target = _resolve_module(node.module, project_root, src_roots)
+            if target is None:
+                continue
+            dunder_all = _extract_dunder_all(target)
+            if dunder_all is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if alias.name not in dunder_all:
+                    yield ctx.violation(
+                        node.lineno,
+                        self.rule,
+                        f"`{alias.name}` is not listed in `{node.module}.__all__`",
+                    )
+
+
+class InitReexportRule:
+    rule = RuleId.INIT_REEXPORT
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        if ctx.path.name == "__init__.py":
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        dunder_all = _extract_dunder_all(ctx.path)
+        if dunder_all is None:
+            return
+        local_names = _locally_defined_names(ctx.tree)
+        all_line = self._find_all_line(ctx.tree)
+        for name in sorted(dunder_all):
+            if name not in local_names:
+                yield ctx.violation(
+                    all_line,
+                    self.rule,
+                    f"`{name}` in __all__ is not locally defined (only __init__.py may re-export)",
+                )
+
+    @staticmethod
+    def _find_all_line(tree: ast.Module) -> int:
+        for node in ast.iter_child_nodes(tree):
+            match node:
+                case ast.Assign(targets=[ast.Name(id="__all__")]):
+                    return node.lineno
+                case ast.AnnAssign(target=ast.Name(id="__all__")):
+                    return node.lineno
+        return 1
+
+
 ALL_RULES: tuple[RuleChecker, ...] = (
     FutureAnnotationsRule(),
     RelativeImportRule(),
@@ -871,6 +947,8 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     EnumPlacementRule(),
     ExceptionPlacementRule(),
     LeafEnumImportRule(),
+    UnlistedImportRule(),
+    InitReexportRule(),
 )
 
 
@@ -894,9 +972,11 @@ def load_config(start: Path | None = None) -> Config:
     with open(pyproject, "rb") as f:
         data = tomllib.load(f)
 
+    project_root = pyproject.parent
+
     tool = data.get("tool", {}).get("xorq-style", {})
     if not tool:
-        return Config()
+        return Config(project_root=project_root)
 
     disabled = frozenset(RuleId(r) for r in tool.get("disable", ()))
 
@@ -912,12 +992,17 @@ def load_config(start: Path | None = None) -> Config:
     strenum_cfg = tool.get("strenum-compat", {})
     strenum_module = strenum_cfg.get("module", "xorq.common.compat")
 
+    unlisted_cfg = tool.get("unlisted-import", {})
+    src_roots = tuple(unlisted_cfg.get("src-roots", ("src", ".")))
+
     return Config(
         disabled=disabled,
         environ_allow_paths=environ_allow,
         exception_base_class=base_class,
         print_allow_files=print_allow,
         strenum_compat_module=strenum_module,
+        project_root=project_root,
+        src_roots=src_roots,
     )
 
 
@@ -958,6 +1043,80 @@ def _in_type_checking(parents: tuple[ast.AST, ...]) -> bool:
             case ast.If(test=ast.Attribute(attr="TYPE_CHECKING")):
                 return True
     return False
+
+
+def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
+    if not isinstance(node, ast.List | ast.Tuple):
+        return None
+    names: set[str] = set()
+    for elt in node.elts:
+        match elt:
+            case ast.Constant(value=str() as name):
+                names.add(name)
+            case ast.Starred():
+                return None
+            case _:
+                return None
+    return frozenset(names)
+
+
+@cache
+def _extract_dunder_all(path: Path) -> frozenset[str] | None:
+    try:
+        source = path.read_text()
+        tree = ast.parse(source, filename=str(path))
+    except (SyntaxError, UnicodeDecodeError, OSError):
+        return None
+    for node in ast.iter_child_nodes(tree):
+        match node:
+            case ast.Assign(targets=[ast.Name(id="__all__")], value=value):
+                return _extract_all_names(value)
+            case ast.AnnAssign(target=ast.Name(id="__all__"), value=value) if value is not None:
+                return _extract_all_names(value)
+    return None
+
+
+@cache
+def _resolve_module(
+    module_path: str, project_root: Path, src_roots: tuple[str, ...]
+) -> Path | None:
+    parts = module_path.split(".")
+    rel = Path(*parts)
+    for root_str in src_roots:
+        base = project_root / root_str
+        candidate = base / rel.with_suffix(".py")
+        if candidate.is_file():
+            return candidate
+        candidate = base / rel / "__init__.py"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _is_within_package(filepath: Path, project_root: Path, src_roots: tuple[str, ...]) -> bool:
+    resolved = filepath.resolve()
+    for root_str in src_roots:
+        base = (project_root / root_str).resolve()
+        if resolved.is_relative_to(base):
+            return True
+    return False
+
+
+def _locally_defined_names(tree: ast.Module) -> frozenset[str]:
+    names: set[str] = set()
+    for node in ast.iter_child_nodes(tree):
+        match node:
+            case ast.FunctionDef(name=name) | ast.AsyncFunctionDef(name=name):
+                names.add(name)
+            case ast.ClassDef(name=name):
+                names.add(name)
+            case ast.Assign(targets=targets):
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id != "__all__":
+                        names.add(target.id)
+            case ast.AnnAssign(target=ast.Name(id=name)) if name != "__all__":
+                names.add(name)
+    return frozenset(names)
 
 
 def _top_modules(node: ast.AST) -> tuple[str, ...]:

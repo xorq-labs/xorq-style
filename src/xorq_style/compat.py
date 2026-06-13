@@ -11,4 +11,4 @@ else:
         pass
 
 
-__all__ = ["StrEnum"]
+__all__ = ["StrEnum"]  # xorq-style: disable=init-reexport

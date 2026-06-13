@@ -1661,7 +1661,7 @@ def test_load_config_no_tool_section(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text("[project]\nname = 'foo'\n")
     config = load_config(tmp_path)
-    assert config == Config()
+    assert config == Config(project_root=tmp_path)
 
 
 def test_config_disabled_merged_with_cli(tmp_py: _WritePy) -> None:
@@ -1873,6 +1873,332 @@ def test_shell_complete_disable_comma_prefix() -> None:
 
 
 # ---- protocol conformance ----
+
+
+# ---- init-reexport ----
+
+
+def test_init_reexport_all_local(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+
+        BAZ = 42
+
+        __all__ = ["foo", "Bar", "BAZ"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_imported_name_in_all(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        __all__ = ["Foo"]
+    """)
+    vs = [v for v in check(path) if v.rule == "init-reexport"]
+    assert len(vs) == 1
+    assert "Foo" in vs[0].msg
+
+
+def test_init_reexport_init_file_exempt(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Foo
+
+        __all__ = ["Foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_no_all(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_mixed(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        def bar() -> None: ...
+
+        __all__ = ["Foo", "bar"]
+    """)
+    vs = [v for v in check(path) if v.rule == "init-reexport"]
+    assert len(vs) == 1
+    assert "Foo" in vs[0].msg
+    assert "bar" not in vs[0].msg
+
+
+def test_init_reexport_assignment_counts_as_local(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        Foo = Foo  # re-assignment makes it local
+
+        __all__ = ["Foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_starred_all_skipped(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        __all__ = [*other.__all__, "Foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_violation_line(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        __all__ = ["Foo"]
+    """)
+    vs = [v for v in check(path) if v.rule == "init-reexport"]
+    assert len(vs) == 1
+    assert vs[0].line == 4
+
+
+# ---- unlisted-import ----
+
+
+def _make_project(
+    tmp_path: Path,
+    target_code: str,
+    consumer_code: str,
+    *,
+    target_name: str = "target.py",
+    consumer_name: str = "consumer.py",
+    src_root: str = ".",
+) -> str:
+    """Create a minimal project structure and return the consumer file path."""
+    pyproject = tmp_path / "pyproject.toml"
+    toml = f'[tool.xorq-style]\n[tool.xorq-style.unlisted-import]\nsrc-roots = ["{src_root}"]\n'
+    pyproject.write_text(toml)
+
+    base = tmp_path / src_root if src_root != "." else tmp_path
+    pkg = base / "pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / target_name).write_text(textwrap.dedent(target_code))
+    (pkg / consumer_name).write_text(textwrap.dedent(consumer_code))
+    return str(pkg / consumer_name)
+
+
+def test_unlisted_import_name_in_all(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            __all__ = ["foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import foo
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_unlisted_import_name_not_in_all(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            def _private() -> None: ...
+            __all__ = ["foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import _private
+        """,
+    )
+    config = load_config(tmp_path)
+    vs = [v for v in check(path, config=config) if v.rule == "unlisted-import"]
+    assert len(vs) == 1
+    assert "_private" in vs[0].msg
+
+
+def test_unlisted_import_no_all_defined(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import foo
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_unlisted_import_type_checking_exempt(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            class Foo: ...
+            __all__ = ["Foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from typing import TYPE_CHECKING
+            if TYPE_CHECKING:
+                from pkg.target import Bar
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_unlisted_import_external_package(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            __all__ = ["Foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from os.path import join
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_unlisted_import_starred_all_skipped(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            import other
+            __all__ = [*other.__all__, "foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import bar
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_unlisted_import_star_import_not_checked(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            __all__ = ["foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import *
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_unlisted_import_multiple_names_partial(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            def bar() -> None: ...
+            __all__ = ["foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import foo, bar
+        """,
+    )
+    config = load_config(tmp_path)
+    vs = [v for v in check(path, config=config) if v.rule == "unlisted-import"]
+    assert len(vs) == 1
+    assert "bar" in vs[0].msg
+
+
+def test_unlisted_import_no_project_root(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from pkg.target import foo
+    """)
+    assert "unlisted-import" not in _rules(check(path))
+
+
+def test_unlisted_import_package_init(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.xorq-style]\n[tool.xorq-style.unlisted-import]\nsrc-roots = ["."]\n'
+    )
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text('__all__ = ["Foo"]\nclass Foo: ...\n')
+    sub = pkg / "sub"
+    sub.mkdir()
+    (sub / "__init__.py").write_text("")
+    (sub / "consumer.py").write_text("from __future__ import annotations\nfrom pkg import Bar\n")
+    config = load_config(tmp_path)
+    vs = [v for v in check(str(sub / "consumer.py"), config=config) if v.rule == "unlisted-import"]
+    assert len(vs) == 1
+    assert "Bar" in vs[0].msg
+
+
+def test_unlisted_import_src_root_config(tmp_path: Path) -> None:
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            __all__ = ["foo"]
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import bar
+        """,
+        src_root="src",
+    )
+    config = load_config(tmp_path)
+    vs = [v for v in check(path, config=config) if v.rule == "unlisted-import"]
+    assert len(vs) == 1
+    assert "bar" in vs[0].msg
+
+
+# ---- load_config (new fields) ----
+
+
+def test_load_config_src_roots_custom(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.xorq-style]\n[tool.xorq-style.unlisted-import]\nsrc-roots = ["python/"]\n'
+    )
+    config = load_config(tmp_path)
+    assert config.src_roots == ("python/",)
+    assert config.project_root == tmp_path
+
+
+def test_load_config_src_roots_default(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[tool.xorq-style]\n")
+    config = load_config(tmp_path)
+    assert config.src_roots == ("src", ".")
+    assert config.project_root == tmp_path
 
 
 def test_all_rules_satisfy_protocol() -> None:

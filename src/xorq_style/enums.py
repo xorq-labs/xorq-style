@@ -28,3 +28,5 @@ class RuleId(StrEnum):
     ENUM_PLACEMENT = "enum-placement"
     EXCEPTION_PLACEMENT = "exception-placement"
     LEAF_ENUM_IMPORT = "leaf-enum-import"
+    UNLISTED_IMPORT = "unlisted-import"
+    INIT_REEXPORT = "init-reexport"
