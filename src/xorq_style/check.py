@@ -1345,8 +1345,10 @@ def _report(errors: tuple[Violation, ...], *, json_output: bool) -> None:
             for error in errors:
                 click.echo(error, err=True)
         sys.exit(2)
-    elif json_output:
-        click.echo("[]")
+    else:
+        if json_output:
+            click.echo("[]")
+        sys.exit(0)
 
 
 def _hook(*, disabled: frozenset[RuleId] = frozenset(), json_output: bool = False) -> None:
@@ -1380,12 +1382,19 @@ def _diff(*, disabled: frozenset[RuleId] = frozenset(), json_output: bool = Fals
         _report((), json_output=json_output)
         return
 
+    existing = {f for f in file_lines if Path(f).is_file()}
+    if not existing:
+        raise click.UsageError(
+            f"--diff: none of the {len(file_lines)} file(s) in the diff exist relative to cwd.\n"
+            "Ensure you run from the repository root and use standard a/b prefixes "
+            "(--no-prefix and custom --dst-prefix are not supported).\n"
+            "Example: git diff | xorq-check-style --diff"
+        )
+
     all_errors: list[Violation] = []
-    for filepath, only_lines in sorted(file_lines.items()):
-        if not Path(filepath).is_file():
-            continue
+    for filepath in sorted(existing):
         config = load_config(Path(filepath).parent)
-        errors = check(filepath, only_lines=only_lines, disabled=disabled, config=config)
+        errors = check(filepath, only_lines=file_lines[filepath], disabled=disabled, config=config)
         all_errors.extend(errors)
 
     _report(tuple(all_errors), json_output=json_output)
@@ -1468,7 +1477,7 @@ def main(
 
     if list_rules:
         if json_output:
-            click.echo(json.dumps([{"rule": str(r), "description": d} for r, d in RULES.items()]))
+            click.echo(json.dumps([{"rule": r.value, "description": d} for r, d in RULES.items()]))
         else:
             for rule_id, desc in RULES.items():
                 click.echo(f"  {rule_id:24s} {desc}")

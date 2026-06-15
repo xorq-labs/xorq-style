@@ -1785,7 +1785,8 @@ def test_hook_no_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     p.write_text("from __future__ import annotations\nx = 1\n")
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook()
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_with_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1808,7 +1809,8 @@ def test_hook_with_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     p.write_text("x = 1\n")
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook(disabled=frozenset({RuleId.FUTURE_ANNOTATIONS}))
+    with pytest.raises(SystemExit, match="0"):
+        _hook(disabled=frozenset({RuleId.FUTURE_ANNOTATIONS}))
 
 
 def test_hook_bare_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1817,7 +1819,8 @@ def test_hook_bare_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     p.write_text("from __future__ import annotations\nx = 1\n")
     payload = json.dumps({"file_path": str(p), "new_string": "x = 1"})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook()
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_non_dict_tool_input(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1833,7 +1836,8 @@ def test_hook_json_clean_emits_empty_list(
     p.write_text("from __future__ import annotations\nx = 1\n")
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook(json_output=True)
+    with pytest.raises(SystemExit, match="0"):
+        _hook(json_output=True)
     assert json.loads(capsys.readouterr().out) == []
 
 
@@ -2429,7 +2433,7 @@ def test_main_diff_and_hook_exclusive() -> None:
     assert "mutually exclusive" in result.output
 
 
-def test_main_diff_skips_nonexistent_file() -> None:
+def test_main_diff_all_nonexistent_files_errors() -> None:
     diff = textwrap.dedent("""\
         diff --git a/nonexistent.py b/nonexistent.py
         --- /dev/null
@@ -2439,7 +2443,8 @@ def test_main_diff_skips_nonexistent_file() -> None:
     """)
     runner = CliRunner()
     result = runner.invoke(main, ["--diff"], input=diff)
-    assert result.exit_code == 0
+    assert result.exit_code != 0
+    assert "none of the" in result.output
 
 
 def test_main_diff_and_files_exclusive() -> None:
