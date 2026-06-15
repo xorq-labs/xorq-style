@@ -13,6 +13,7 @@ import bisect
 import builtins
 import json
 import os
+import re
 import sys
 import types
 from dataclasses import dataclass  # xorq-style: disable=dataclasses
@@ -29,7 +30,7 @@ from xorq_style.enums import RuleId
 if sys.version_info >= (3, 11):
     import tomllib
 else:
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib  # type: ignore[import-not-found,unused-ignore]
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -1201,6 +1202,46 @@ def _changed_lines(
     return frozenset(lines) or None
 
 
+_HUNK_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+
+
+def _parse_unified_diff(diff_text: str) -> dict[str, frozenset[int]]:
+    result: dict[str, set[int]] = {}
+    current_file: str | None = None
+    current_line = 0
+    in_hunk = False
+
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("diff "):
+            current_file = None
+            in_hunk = False
+        elif raw_line.startswith("+++ "):
+            path = raw_line[4:].split("\t")[0]
+            if path == "/dev/null":
+                current_file = None
+                continue
+            path = path.removeprefix("b/")
+            current_file = path
+            in_hunk = False
+            if current_file not in result:
+                result[current_file] = set()
+        elif not in_hunk and raw_line.startswith("--- "):
+            continue
+        elif m := _HUNK_RE.match(raw_line):
+            current_line = int(m.group(1))
+            in_hunk = True
+        elif in_hunk and current_file is not None:
+            if raw_line.startswith("+"):
+                result[current_file].add(current_line)
+                current_line += 1
+            elif raw_line.startswith(("-", "\\")):
+                pass
+            else:
+                current_line += 1
+
+    return {f: frozenset(lines) for f, lines in result.items() if lines}
+
+
 def check(
     filepath: str,
     only_lines: frozenset[int] | None = None,
@@ -1287,32 +1328,37 @@ class _DisableType(click.ParamType):  # type: ignore[type-arg]
 _DISABLE_TYPE = _DisableType()
 
 
-def _parse_disable(args: list[str]) -> tuple[frozenset[RuleId], tuple[str, ...]]:
-    disabled: set[RuleId] = set()
-    remaining: list[str] = []
-    for arg in args:
-        if arg.startswith("--disable="):
-            disabled |= _DISABLE_TYPE.convert(arg[len("--disable=") :], None, None)
+def _violation_to_dict(v: Violation) -> dict[str, str | int]:
+    return {
+        "filepath": v.filepath,
+        "line": v.line,
+        "rule": v.rule.value,
+        "message": v.msg,
+    }
+
+
+def _report(errors: tuple[Violation, ...], *, json_output: bool) -> NoReturn:
+    if errors:
+        if json_output:
+            click.echo(json.dumps([_violation_to_dict(v) for v in errors]))
         else:
-            remaining.append(arg)
-    return frozenset(disabled), tuple(remaining)
+            for error in errors:
+                click.echo(error, err=True)
+        sys.exit(2)
+    else:
+        if json_output:
+            click.echo("[]")
+        sys.exit(0)
 
 
-def _print_and_exit(errors: tuple[Violation, ...]) -> NoReturn:
-    for error in errors:
-        click.echo(error, err=True)
-    sys.exit(2)
-
-
-def _hook(args: list[str]) -> None:
-    disabled, _ = _parse_disable(args)
+def _hook(*, disabled: frozenset[RuleId] = frozenset(), json_output: bool = False) -> None:
     hook_input = json.load(sys.stdin)
     tool_input = hook_input.get("tool_input", hook_input)
     if not isinstance(tool_input, dict):
-        return
+        _report((), json_output=json_output)
     filepath = tool_input.get("file_path", "")
     if not filepath:
-        return
+        _report((), json_output=json_output)
 
     config = load_config(Path(filepath).parent)
     new_string = tool_input.get("new_string")
@@ -1322,8 +1368,34 @@ def _hook(args: list[str]) -> None:
     )
 
     errors = check(filepath, only_lines, disabled, config)
-    if errors:
-        _print_and_exit(errors)
+    _report(errors, json_output=json_output)
+
+
+def _diff(*, disabled: frozenset[RuleId] = frozenset(), json_output: bool = False) -> None:
+    diff_text = sys.stdin.read()
+    if not diff_text.strip():
+        _report((), json_output=json_output)
+
+    file_lines = _parse_unified_diff(diff_text)
+    if not file_lines:
+        _report((), json_output=json_output)
+
+    existing = {f for f in file_lines if Path(f).is_file()}
+    if not existing:
+        raise click.UsageError(
+            f"--diff: none of the {len(file_lines)} file(s) in the diff exist relative to cwd.\n"
+            "Ensure you run from the repository root and use standard a/b prefixes "
+            "(--no-prefix and custom --dst-prefix are not supported).\n"
+            "Example: git diff | xorq-check-style --diff"
+        )
+
+    all_errors: list[Violation] = []
+    for filepath in sorted(existing):
+        config = load_config(Path(filepath).parent)
+        errors = check(filepath, only_lines=file_lines[filepath], disabled=disabled, config=config)
+        all_errors.extend(errors)
+
+    _report(tuple(all_errors), json_output=json_output)
 
 
 _PROG_NAME = "xorq-check-style"
@@ -1373,6 +1445,13 @@ class _FileFallbackGroup(click.Group):
 @click.option("--list", "list_rules", is_flag=True, help="List all available rules.")
 @click.option("--hook", "hook_mode", is_flag=True, help="Run in hook mode (reads JSON from stdin).")
 @click.option(
+    "--diff",
+    "diff_mode",
+    is_flag=True,
+    help="Read unified diff from stdin, lint only changed lines.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Output violations as JSON.")
+@click.option(
     "--disable",
     default="",
     type=_DISABLE_TYPE,
@@ -1383,19 +1462,33 @@ def main(
     ctx: click.Context,
     list_rules: bool,
     hook_mode: bool,
+    diff_mode: bool,
+    json_output: bool,
     disable: frozenset[RuleId],
 ) -> None:
     """Style enforcement for xorq Python projects."""
     if ctx.invoked_subcommand is not None:
         return
 
+    if hook_mode and diff_mode:
+        raise click.UsageError("--hook and --diff are mutually exclusive.")
+
     if list_rules:
-        for rule_id, desc in RULES.items():
-            click.echo(f"  {rule_id:24s} {desc}")
+        if json_output:
+            click.echo(json.dumps([{"rule": r.value, "description": d} for r, d in RULES.items()]))
+        else:
+            for rule_id, desc in RULES.items():
+                click.echo(f"  {rule_id:24s} {desc}")
         return
 
     if hook_mode:
-        _hook(sys.argv[1:])
+        _hook(disabled=disable, json_output=json_output)
+        return
+
+    if diff_mode:
+        if ctx.args:
+            raise click.UsageError("--diff reads from stdin; positional FILES are not allowed.")
+        _diff(disabled=disable, json_output=json_output)
         return
 
     files = ctx.args
@@ -1404,8 +1497,7 @@ def main(
 
     config = load_config()
     all_errors = tuple(error for f in files for error in check(f, disabled=disable, config=config))
-    if all_errors:
-        _print_and_exit(all_errors)
+    _report(all_errors, json_output=json_output)
 
 
 @main.command()

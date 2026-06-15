@@ -19,7 +19,8 @@ from xorq_style.check import (
     Violation,
     _changed_lines,
     _hook,
-    _parse_disable,
+    _parse_unified_diff,
+    _violation_to_dict,
     check,
     load_config,
     main,
@@ -1779,17 +1780,13 @@ def test_main_no_args() -> None:
     assert "Usage" in result.output or "Missing" in result.output
 
 
-def test_parse_disable_invalid_rule() -> None:
-    with pytest.raises(click.exceptions.BadParameter, match="unknown rule"):
-        _parse_disable(["--disable=nonexistent-rule"])
-
-
 def test_hook_no_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "mod.py"
     p.write_text("from __future__ import annotations\nx = 1\n")
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook([])
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_with_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1798,13 +1795,14 @@ def test_hook_with_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     with pytest.raises(SystemExit, match="2"):
-        _hook([])
+        _hook()
 
 
 def test_hook_empty_filepath(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.dumps({"tool_input": {"file_path": "", "new_string": "x"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook([])
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_with_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1812,7 +1810,8 @@ def test_hook_with_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     p.write_text("x = 1\n")
     payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook(["--hook", "--disable=future-annotations"])
+    with pytest.raises(SystemExit, match="0"):
+        _hook(disabled=frozenset({RuleId.FUTURE_ANNOTATIONS}))
 
 
 def test_hook_bare_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1821,13 +1820,27 @@ def test_hook_bare_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     p.write_text("from __future__ import annotations\nx = 1\n")
     payload = json.dumps({"file_path": str(p), "new_string": "x = 1"})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook([])
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_non_dict_tool_input(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.dumps({"tool_input": "unexpected"})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook([])
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
+
+
+def test_hook_json_clean_emits_empty_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "mod.py"
+    p.write_text("from __future__ import annotations\nx = 1\n")
+    payload = json.dumps({"tool_input": {"file_path": str(p), "new_string": "x = 1"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    with pytest.raises(SystemExit, match="0"):
+        _hook(json_output=True)
+    assert json.loads(capsys.readouterr().out) == []
 
 
 def test_main_with_file(tmp_path: Path) -> None:
@@ -2209,3 +2222,310 @@ def test_all_rules_satisfy_protocol() -> None:
 def test_all_rule_ids_covered() -> None:
     implemented = frozenset(r.rule for r in ALL_RULES)
     assert implemented == frozenset(RuleId)
+
+
+# ---- _parse_unified_diff ----
+
+
+def test_parse_diff_single_file_added_lines() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/foo.py b/foo.py
+        --- a/foo.py
+        +++ b/foo.py
+        @@ -1,3 +1,4 @@
+         line1
+        +added
+         line2
+         line3
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {"foo.py": frozenset({2})}
+
+
+def test_parse_diff_multiple_files() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/a.py b/a.py
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,2 +1,3 @@
+         x
+        +y
+         z
+        diff --git a/b.py b/b.py
+        --- a/b.py
+        +++ b/b.py
+        @@ -1,2 +1,3 @@
+         a
+         b
+        +c
+    """)
+    result = _parse_unified_diff(diff)
+    assert "a.py" in result
+    assert "b.py" in result
+    assert result["a.py"] == frozenset({2})
+    assert result["b.py"] == frozenset({3})
+
+
+def test_parse_diff_deleted_file_skipped() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/gone.py b/gone.py
+        --- a/gone.py
+        +++ /dev/null
+        @@ -1,2 +0,0 @@
+        -old1
+        -old2
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {}
+
+
+def test_parse_diff_new_file() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/new.py b/new.py
+        --- /dev/null
+        +++ b/new.py
+        @@ -0,0 +1,3 @@
+        +line1
+        +line2
+        +line3
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {"new.py": frozenset({1, 2, 3})}
+
+
+def test_parse_diff_context_lines_not_included() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/f.py b/f.py
+        --- a/f.py
+        +++ b/f.py
+        @@ -1,5 +1,5 @@
+         ctx1
+         ctx2
+        -old
+        +new
+         ctx4
+         ctx5
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {"f.py": frozenset({3})}
+
+
+def test_parse_diff_multiple_hunks() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/f.py b/f.py
+        --- a/f.py
+        +++ b/f.py
+        @@ -1,3 +1,4 @@
+         a
+        +b
+         c
+         d
+        @@ -10,3 +11,4 @@
+         x
+        +y
+         z
+         w
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {"f.py": frozenset({2, 12})}
+
+
+def test_parse_diff_empty_input() -> None:
+    assert _parse_unified_diff("") == {}
+    assert _parse_unified_diff("   \n  \n") == {}
+
+
+def test_parse_diff_no_prefix() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/foo.py b/foo.py
+        --- foo.py
+        +++ foo.py
+        @@ -1,2 +1,3 @@
+         a
+        +b
+         c
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {"foo.py": frozenset({2})}
+
+
+def test_parse_diff_only_removed_lines() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/f.py b/f.py
+        --- a/f.py
+        +++ b/f.py
+        @@ -1,4 +1,2 @@
+         keep
+        -gone1
+        -gone2
+         keep2
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {}
+
+
+def test_parse_diff_removed_line_starting_with_triple_dash() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/f.py b/f.py
+        --- a/f.py
+        +++ b/f.py
+        @@ -1,4 +1,4 @@
+         keep
+        ---- old separator
+        +--- new separator
+         keep2
+         keep3
+    """)
+    result = _parse_unified_diff(diff)
+    assert result == {"f.py": frozenset({2})}
+
+
+# ---- _violation_to_dict ----
+
+
+def test_violation_to_dict() -> None:
+    v = Violation(filepath="a.py", line=10, rule=RuleId.PRINT, msg="no print")
+    d = _violation_to_dict(v)
+    assert d == {"filepath": "a.py", "line": 10, "rule": "print", "message": "no print"}
+
+
+# ---- --diff CLI ----
+
+
+def test_main_diff_reads_stdin(tmp_py: _WritePy) -> None:
+    filepath = tmp_py("import os.path\n")
+    diff = (
+        f"diff --git a/{filepath} b/{filepath}\n"
+        f"--- a/{filepath}\n"
+        f"+++ b/{filepath}\n"
+        "@@ -0,0 +1 @@\n"
+        "+import os.path\n"
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff"], input=diff)
+    assert result.exit_code == 2
+    assert "os-path" in result.output
+
+
+def test_main_diff_no_violations(tmp_py: _WritePy) -> None:
+    filepath = tmp_py("from __future__ import annotations\nx = 1\n")
+    diff = (
+        f"diff --git a/{filepath} b/{filepath}\n"
+        f"--- a/{filepath}\n"
+        f"+++ b/{filepath}\n"
+        "@@ -1,1 +1,2 @@\n"
+        " from __future__ import annotations\n"
+        "+x = 1\n"
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff"], input=diff)
+    assert result.exit_code == 0
+
+
+def test_main_diff_empty_stdin() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff"], input="")
+    assert result.exit_code == 0
+
+
+def test_main_diff_and_hook_exclusive() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff", "--hook"], input="")
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+def test_main_diff_all_nonexistent_files_errors() -> None:
+    diff = textwrap.dedent("""\
+        diff --git a/nonexistent.py b/nonexistent.py
+        --- /dev/null
+        +++ b/nonexistent.py
+        @@ -0,0 +1 @@
+        +import os.path
+    """)
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff"], input=diff)
+    assert result.exit_code != 0
+    assert "none of the" in result.output
+
+
+def test_main_diff_and_files_exclusive() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff", "src/foo.py"], input="")
+    assert result.exit_code != 0
+    assert "not allowed" in result.output
+
+
+# ---- --json CLI ----
+
+
+def test_main_json_with_violations(tmp_py: _WritePy) -> None:
+    filepath = tmp_py("from __future__ import annotations\nimport os.path\n")
+    runner = CliRunner()
+    result = runner.invoke(main, ["--json", filepath])
+    assert result.exit_code == 2
+    data = json.loads(result.output)
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    rules = {d["rule"] for d in data}
+    assert "os-path" in rules
+    assert data[0]["filepath"] == filepath
+
+
+def test_main_json_no_violations(tmp_py: _WritePy) -> None:
+    filepath = tmp_py("from __future__ import annotations\nx = 1\n")
+    runner = CliRunner()
+    result = runner.invoke(main, ["--json", filepath])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data == []
+
+
+def test_main_json_structure(tmp_py: _WritePy) -> None:
+    filepath = tmp_py("import os.path\n")
+    runner = CliRunner()
+    result = runner.invoke(main, ["--json", filepath])
+    data = json.loads(result.output)
+    for entry in data:
+        assert set(entry.keys()) == {"filepath", "line", "rule", "message"}
+        assert isinstance(entry["line"], int)
+        assert isinstance(entry["rule"], str)
+
+
+def test_main_json_with_diff(tmp_py: _WritePy) -> None:
+    filepath = tmp_py("from __future__ import annotations\nimport os.path\n")
+    diff = (
+        f"diff --git a/{filepath} b/{filepath}\n"
+        f"--- a/{filepath}\n"
+        f"+++ b/{filepath}\n"
+        "@@ -1,1 +1,2 @@\n"
+        " from __future__ import annotations\n"
+        "+import os.path\n"
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff", "--json"], input=diff)
+    assert result.exit_code == 2
+    data = json.loads(result.output)
+    assert len(data) >= 1
+    rules = {d["rule"] for d in data}
+    assert "os-path" in rules
+
+
+def test_main_json_empty_diff() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--diff", "--json"], input="")
+    assert result.exit_code == 0
+    assert json.loads(result.output) == []
+
+
+def test_main_json_list_rules() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--list", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert isinstance(data, list)
+    assert len(data) > 0
+    for entry in data:
+        assert set(entry.keys()) == {"rule", "description"}
+        assert isinstance(entry["rule"], str)
+        assert isinstance(entry["description"], str)
