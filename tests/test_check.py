@@ -1801,7 +1801,8 @@ def test_hook_with_violations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 def test_hook_empty_filepath(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.dumps({"tool_input": {"file_path": "", "new_string": "x"}})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook()
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_with_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1826,7 +1827,8 @@ def test_hook_bare_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def test_hook_non_dict_tool_input(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.dumps({"tool_input": "unexpected"})
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
-    _hook()
+    with pytest.raises(SystemExit, match="0"):
+        _hook()
 
 
 def test_hook_json_clean_emits_empty_list(

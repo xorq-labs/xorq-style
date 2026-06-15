@@ -20,7 +20,7 @@ from dataclasses import dataclass  # xorq-style: disable=dataclasses
 from functools import cache
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 import click
 from click.shell_completion import get_completion_class
@@ -1337,7 +1337,7 @@ def _violation_to_dict(v: Violation) -> dict[str, str | int]:
     }
 
 
-def _report(errors: tuple[Violation, ...], *, json_output: bool) -> None:
+def _report(errors: tuple[Violation, ...], *, json_output: bool) -> NoReturn:
     if errors:
         if json_output:
             click.echo(json.dumps([_violation_to_dict(v) for v in errors]))
@@ -1355,10 +1355,10 @@ def _hook(*, disabled: frozenset[RuleId] = frozenset(), json_output: bool = Fals
     hook_input = json.load(sys.stdin)
     tool_input = hook_input.get("tool_input", hook_input)
     if not isinstance(tool_input, dict):
-        return
+        _report((), json_output=json_output)
     filepath = tool_input.get("file_path", "")
     if not filepath:
-        return
+        _report((), json_output=json_output)
 
     config = load_config(Path(filepath).parent)
     new_string = tool_input.get("new_string")
@@ -1375,12 +1375,10 @@ def _diff(*, disabled: frozenset[RuleId] = frozenset(), json_output: bool = Fals
     diff_text = sys.stdin.read()
     if not diff_text.strip():
         _report((), json_output=json_output)
-        return
 
     file_lines = _parse_unified_diff(diff_text)
     if not file_lines:
         _report((), json_output=json_output)
-        return
 
     existing = {f for f in file_lines if Path(f).is_file()}
     if not existing:
