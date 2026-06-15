@@ -48,6 +48,38 @@ xorq-check-style --list                          # show all rules
 xorq-check-style --disable=print,dataclasses .   # skip specific rules
 ```
 
+### Lint only changed lines
+
+Pipe any unified diff to `--diff` to lint only the lines that were added or modified:
+
+```bash
+git diff | xorq-check-style --diff               # unstaged changes
+git diff HEAD~3 | xorq-check-style --diff        # last 3 commits
+git diff main | xorq-check-style --diff          # changes vs main branch
+```
+
+This gives the same changed-line scoping that the Claude Code hook gets automatically.
+
+### JSON output
+
+Add `--json` to any invocation to get machine-readable output on stdout:
+
+```bash
+xorq-check-style --json src/myproject/foo.py
+git diff | xorq-check-style --diff --json
+```
+
+Each violation is an object with `filepath`, `line`, `rule`, and `message` fields:
+
+```json
+[
+  {"filepath": "src/foo.py", "line": 12, "rule": "os-path", "message": "import os.path (use pathlib.Path instead)"}
+]
+```
+
+JSON is written to stdout; in text mode (the default), violations go to stderr.
+Both modes exit 0 when clean and exit 2 when there are violations.
+
 ### Shell completions
 
 ```bash
