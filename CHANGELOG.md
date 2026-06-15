@@ -5,11 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-15
+### Details
+#### Added
+- Add version subcommand by @dlovell in [#18](https://github.com/xorq-labs/xorq-style/pull/18)
+- Add 4 new lint rules for enum/exception module organization by @dlovell in [#19](https://github.com/xorq-labs/xorq-style/pull/19)
+- Add unlisted-import and init-reexport lint rules by @dlovell in [#22](https://github.com/xorq-labs/xorq-style/pull/22)
+- Add --diff and --json flags by @dlovell in [#23](https://github.com/xorq-labs/xorq-style/pull/23)
+
+#### Fixed
+- Use exit code 2 in hook mode so Claude Code surfaces violations by @dlovell in [#21](https://github.com/xorq-labs/xorq-style/pull/21)
+
 ## [0.2.0] - 2026-06-07
 ### Details
 #### Added
 - Add 7 new lint rules by @dlovell in [#14](https://github.com/xorq-labs/xorq-style/pull/14)
 - Add import-aliasing lint rule by @dlovell in [#15](https://github.com/xorq-labs/xorq-style/pull/15)
+
+#### Changed
+- 0.2.0 by @dlovell in [#17](https://github.com/xorq-labs/xorq-style/pull/17)
 
 #### Fixed
 - Fix release flow gaps in CONTRIBUTING.md by @dlovell in [#13](https://github.com/xorq-labs/xorq-style/pull/13)
