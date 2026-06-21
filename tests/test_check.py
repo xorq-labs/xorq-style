@@ -331,8 +331,26 @@ def test_os_environ_in_utils(tmp_path: Path) -> None:
     d.mkdir(parents=True)
     p = d / "env_utils.py"
     p.write_text("from __future__ import annotations\nimport os\nx = os.environ['FOO']\n")
-    config = Config(environ_allow_paths=("common/utils",))
+    config = Config(environ_allow_paths=("common/utils/**",), project_root=tmp_path)
     assert "os-environ" not in _rules(check(str(p), config=config))
+
+
+def test_os_environ_recursive_glob(tmp_path: Path) -> None:
+    d = tmp_path / "src" / "a" / "common"
+    d.mkdir(parents=True)
+    p = d / "env_utils.py"
+    p.write_text("from __future__ import annotations\nimport os\nx = os.environ['FOO']\n")
+    config = Config(environ_allow_paths=("**/common/**",), project_root=tmp_path)
+    assert "os-environ" not in _rules(check(str(p), config=config))
+
+
+def test_os_environ_glob_no_match(tmp_path: Path) -> None:
+    d = tmp_path / "src" / "core"
+    d.mkdir(parents=True)
+    p = d / "settings.py"
+    p.write_text("from __future__ import annotations\nimport os\nx = os.environ['FOO']\n")
+    config = Config(environ_allow_paths=("common/**",), project_root=tmp_path)
+    assert "os-environ" in _rules(check(str(p), config=config))
 
 
 # ---- os-path ----
@@ -601,6 +619,45 @@ def test_print_in_cli(tmp_py: _WritePy) -> None:
         name="cli.py",
     )
     assert "print" not in _rules(check(path, config=config))
+
+
+def _write_nested(tmp_path: Path, rel: str) -> str:
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("from __future__ import annotations\nprint('hello')\n")
+    return str(p)
+
+
+def test_print_allow_bare_name_matches_anywhere(tmp_path: Path) -> None:
+    config = Config(print_allow_files=frozenset({"cli.py"}), project_root=tmp_path)
+    path = _write_nested(tmp_path, "src/pkg/cli.py")
+    assert "print" not in _rules(check(path, config=config))
+
+
+def test_print_allow_relative_path(tmp_path: Path) -> None:
+    config = Config(print_allow_files=frozenset({"src/pkg/cli.py"}), project_root=tmp_path)
+    path = _write_nested(tmp_path, "src/pkg/cli.py")
+    assert "print" not in _rules(check(path, config=config))
+
+
+def test_print_allow_relative_path_no_match(tmp_path: Path) -> None:
+    config = Config(print_allow_files=frozenset({"src/other/cli.py"}), project_root=tmp_path)
+    path = _write_nested(tmp_path, "src/pkg/cli.py")
+    assert "print" in _rules(check(path, config=config))
+
+
+def test_print_allow_recursive_glob(tmp_path: Path) -> None:
+    config = Config(print_allow_files=frozenset({"src/**/cli.py"}), project_root=tmp_path)
+    path = _write_nested(tmp_path, "src/a/b/cli.py")
+    assert "print" not in _rules(check(path, config=config))
+
+
+def test_print_allow_segment_glob(tmp_path: Path) -> None:
+    config = Config(print_allow_files=frozenset({"src/*/scripts.py"}), project_root=tmp_path)
+    deep = _write_nested(tmp_path, "src/a/b/scripts.py")
+    shallow = _write_nested(tmp_path, "src/a/scripts.py")
+    assert "print" in _rules(check(deep, config=config))
+    assert "print" not in _rules(check(shallow, config=config))
 
 
 # ---- type-annotations ----
@@ -1706,7 +1763,7 @@ def test_config_environ_allow_paths(tmp_path: Path) -> None:
     d.mkdir()
     p = d / "settings.py"
     p.write_text("from __future__ import annotations\nimport os\nx = os.environ['FOO']\n")
-    config = Config(environ_allow_paths=("config/",))
+    config = Config(environ_allow_paths=("config/**",), project_root=tmp_path)
     assert "os-environ" not in _rules(check(str(p), config=config))
 
 

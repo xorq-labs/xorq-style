@@ -120,19 +120,28 @@ Add a `[tool.xorq-style]` section to your `pyproject.toml`:
 disable = ["dataclasses", "os-path"]   # disable rules globally
 
 [tool.xorq-style.os-environ]
-allow-paths = ["common/", "utils/"]    # allow os.environ in these paths
+# allow os.environ in matching files, using the same gitignore-style patterns as
+# print.allow-files; to exempt a whole directory tree, add /** (e.g. "common/**")
+allow-paths = ["common/**", "src/**/utils/**"]
 
 [tool.xorq-style.exception-hierarchy]
 base-class = "XorqError"              # expected base class (default: XorqError)
 
 [tool.xorq-style.print]
-allow-files = ["cli.py"]              # allow print() in these filenames
+# allow print() in matching files. Patterns use gitignore syntax: a bare name
+# matches anywhere; patterns with a slash (incl. ** globs) are anchored to pyproject.toml
+allow-files = ["cli.py", "src/pkg/scripts.py", "src/**/repl.py"]
 
 [tool.xorq-style.unlisted-import]
 src-roots = ["python/"]               # source roots relative to pyproject.toml (default: ["src", "."])
 ```
 
 All fields are optional. The config file is discovered by walking up from the checked file's directory.
+
+> **Migration note (os-environ):** `os-environ.allow-paths` previously matched as
+> plain substrings of the file path. It now uses gitignore-style globs, like
+> `print.allow-files`. Rewrite bare directory prefixes as subtree globs — e.g.
+> `allow-paths = ["common/"]` becomes `allow-paths = ["common/**"]`.
 
 ## Inline suppression
 

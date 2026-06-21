@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import bisect
 import builtins
+import contextlib
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 import click
+import pathspec
 from click.shell_completion import get_completion_class
 
 from xorq_style.enums import RuleId
@@ -276,8 +278,7 @@ class OsEnvironRule:
     def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
         if not ctx.enabled(self.rule):
             return ()
-        path_str = str(ctx.path)
-        if any(fragment in path_str for fragment in ctx.config.environ_allow_paths):
+        if _path_matches(ctx.path, ctx.config.environ_allow_paths, ctx.config.project_root):
             return ()
         return tuple(self._check(ctx))
 
@@ -426,7 +427,7 @@ class PrintRule:
     def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
         if not ctx.enabled(self.rule) or ctx.is_test:
             return ()
-        if ctx.path.name in ctx.config.print_allow_files:
+        if _path_matches(ctx.path, ctx.config.print_allow_files, ctx.config.project_root):
             return ()
         return tuple(self._check(ctx))
 
@@ -1138,6 +1139,31 @@ def _full_module_paths(node: ast.AST) -> tuple[str, ...]:
             return (module,)
         case _:
             return ()
+
+
+@cache
+def _build_pathspec(patterns: tuple[str, ...]) -> pathspec.GitIgnoreSpec:
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
+
+
+def _path_matches(
+    path: Path, patterns: tuple[str, ...] | frozenset[str], project_root: Path | None
+) -> bool:
+    """Return True if *path* matches any gitignore-style *pattern*.
+
+    Patterns use gitwildmatch (gitignore) semantics: a bare name like ``cli.py``
+    matches at any depth, while ``src/**/cli.py`` and ``foo/cli.py`` are anchored
+    to the project root. Matching is order-independent — these are additive
+    allow-lists, so ``!`` negation is not meaningful.
+    """
+    if not patterns:
+        return False
+    spec = _build_pathspec(tuple(sorted(patterns)))
+    target = path.as_posix()
+    if project_root is not None:
+        with contextlib.suppress(ValueError):
+            target = path.resolve().relative_to(project_root.resolve()).as_posix()
+    return spec.match_file(target) or spec.match_file(path.name)
 
 
 _SUPPRESS_PREFIX = "# xorq-style: disable="
