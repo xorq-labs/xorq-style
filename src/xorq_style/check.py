@@ -947,35 +947,39 @@ class InitAllRule:
         return tuple(self._check(ctx))
 
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        # A name bound by an import is a re-export — exempt even when a local
+        # fallback rebinds it (the `try: from x import F / except: F = None`
+        # optional-dependency idiom). This mirrors InitReexportRule, which also
+        # treats an import-sourced name as not-locally-originated.
+        imported = _imported_names(ctx.tree)
         public_local = {
             name: line
             for name, line in _locally_defined_names(ctx.tree).items()
-            if not name.startswith("_")
+            if not name.startswith("_") and name not in imported
         }
         if not public_local:
             # Empty / comment-only / re-export-only __init__.py: nothing to require.
             return
         present, dunder_all = _resolve_dunder_all(ctx.tree)
-        if not present:
-            # Report at the first public definition so a trailing
-            # `# xorq-style: disable=init-all` there suppresses it.
-            yield ctx.violation(
-                min(public_local.values()),
-                self.rule,
-                "non-empty __init__.py is missing __all__"
-                f" (define it listing: {', '.join(sorted(public_local))})",
-            )
-            return
-        if dunder_all is None:
+        if present and dunder_all is None:
             # __all__ is present but unverifiable — computed dynamically, or
             # mutated opaquely (`.extend(...)`, subscript assignment). We cannot
             # verify completeness, so leave it alone rather than misreport.
             return
-        for name in sorted(set(public_local) - dunder_all):
+        # Absent __all__ is just the limiting case of completeness — every public
+        # name is missing. Report per-name at each definition line (rather than a
+        # single message at the first one) so the violation lands on a changed
+        # line under `--diff` and a trailing `# xorq-style: disable=init-all`
+        # suppresses that name specifically.
+        # `dunder_all` is non-None here (the present-but-unverifiable case
+        # returned above); `or frozenset()` also covers the absent case (None).
+        listed = dunder_all or frozenset()
+        suffix = "" if present else " (define __all__)"
+        for name in sorted(set(public_local) - listed):
             yield ctx.violation(
                 public_local[name],
                 self.rule,
-                f"public name `{name}` is defined locally but missing from __all__",
+                f"public name `{name}` is defined locally but missing from __all__{suffix}",
             )
 
 
@@ -1093,14 +1097,28 @@ def _in_function(parents: tuple[ast.AST, ...]) -> bool:
     return any(isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef) for p in parents)
 
 
-def _in_type_checking(parents: tuple[ast.AST, ...]) -> bool:
-    for p in parents:
-        match p:
-            case ast.If(test=ast.Name(id="TYPE_CHECKING")):
-                return True
-            case ast.If(test=ast.Attribute(attr="TYPE_CHECKING")):
+def _is_type_checking_test(test: ast.expr) -> bool:
+    """True if an ``if`` ``test`` references ``TYPE_CHECKING`` anywhere.
+
+    Recognises the bare ``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:`` guard
+    *and* any compound guard that mentions it (``if TYPE_CHECKING and ...:``). A
+    body under such a guard is type-only — ``TYPE_CHECKING`` is ``False`` at
+    runtime, so the branch never executes — and its bindings are not real
+    exports. Matching on *any* occurrence fails safe: an unrecognised compound
+    guard degrades to "treat as type-only" (a silent miss) rather than recording
+    phantom runtime names, which is the sound default for this checker. Keeping
+    the one shape-list here means the per-node (:func:`_module_scope_stmts`) and
+    parent-stack (:func:`_in_type_checking`) callers cannot drift apart.
+    """
+    for node in ast.walk(test):
+        match node:
+            case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
                 return True
     return False
+
+
+def _in_type_checking(parents: tuple[ast.AST, ...]) -> bool:
+    return any(isinstance(p, ast.If) and _is_type_checking_test(p.test) for p in parents)
 
 
 def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
@@ -1118,16 +1136,19 @@ def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
     return frozenset(names)
 
 
+@cache
 def _dunder_all_nodes(
     tree: ast.Module,
-) -> list[ast.Assign | ast.AnnAssign | ast.AugAssign]:
+) -> tuple[ast.Assign | ast.AnnAssign | ast.AugAssign, ...]:
     """Return every module-scope statement that *assigns* ``__all__``.
 
     Recognises plain/multi-target assignment, annotated assignment (with a
     value) and augmented assignment (``__all__ += [...]``), and descends into
     runtime control-flow blocks via :func:`_module_scope_stmts` so a
-    conditionally declared ``__all__`` is still seen. This keeps presence and
-    contents symmetric with :func:`_locally_defined_names`, which walks the
+    conditionally declared ``__all__`` is still seen. Cached on the tree (this is
+    consulted by both the presence/contents resolver and :func:`_find_all_line`).
+    This keeps presence and contents symmetric with :func:`_locally_defined_names`,
+    which walks the
     same way. Opaque mutations (``.extend(...)``, subscript assignment) are not
     assignments and are handled separately by :func:`_dunder_all_opaque`.
     """
@@ -1142,44 +1163,49 @@ def _dunder_all_nodes(
                 nodes.append(node)
             case ast.AugAssign(target=ast.Name(id="__all__")):
                 nodes.append(node)
-    return nodes
+    return tuple(nodes)
 
 
-def _is_dunder_all_subscript(node: ast.expr) -> bool:
-    return (
-        isinstance(node, ast.Subscript)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "__all__"
-    )
+def _refs_dunder_all(node: ast.AST) -> bool:
+    """True if the name ``__all__`` is referenced in ``node``'s *own* expressions.
+
+    Does not descend into nested statements — those are visited separately by
+    :func:`_module_scope_stmts` — so a container statement (``try``/``if``/...)
+    that merely encloses an ``__all__`` assignment does not itself count as a
+    reference.
+    """
+    for child in ast.iter_child_nodes(node):
+        match child:
+            case ast.stmt():
+                continue
+            case ast.Name(id="__all__"):
+                return True
+            case _:
+                if _refs_dunder_all(child):
+                    return True
+    return False
 
 
 def _dunder_all_opaque(tree: ast.Module) -> bool:
-    """True if ``__all__`` is mutated in a way that cannot be modelled statically.
+    """True if ``__all__`` is touched in a way that cannot be modelled statically.
 
-    A method call (``__all__.append(...)`` / ``.extend(...)``), subscript or
-    slice assignment (``__all__[i] = ...``), or ``del __all__[...]`` changes the
-    export list at runtime in ways a static scan cannot reconstruct. When this
-    happens ``__all__`` must be treated as unverifiable rather than trusting
-    whatever literal assignment was also seen — otherwise the completeness and
-    ``unlisted-import`` checks would flag names that are in fact exported. This
-    is the soundness rule: an ``__all__`` we cannot fully model produces no
-    findings.
+    Fail-closed: only the recognised whole-name assignments
+    (:func:`_dunder_all_nodes`) are verifiable. *Any other* module-scope
+    statement that references ``__all__`` — a method call
+    (``__all__.append(...)`` / ``.extend(...)``), subscript or slice assignment
+    (``__all__[i] = ...``), ``del __all__`` / ``del __all__[...]``, or a future
+    mutation form not yet imagined — is treated as opaque, so ``__all__`` is
+    classified unverifiable rather than trusting a stale literal. Otherwise the
+    completeness and ``unlisted-import`` checks would flag names that are in fact
+    exported. This is the soundness rule, and unlike an allowlist of mutation
+    shapes it degrades unmodelled syntax to silence instead of a wrong export
+    set. (A bare read of ``__all__`` outside an assignment is vanishingly rare in
+    practice; treating it as opaque too only costs a silent miss.)
     """
-    for node in _module_scope_stmts(tree):
-        match node:
-            case ast.Expr(value=ast.Call(func=ast.Attribute(value=ast.Name(id="__all__")))):
-                return True
-            case ast.Assign(targets=targets) if any(
-                _is_dunder_all_subscript(target) for target in targets
-            ):
-                return True
-            case ast.AugAssign(target=target) if _is_dunder_all_subscript(target):
-                return True
-            case ast.Delete(targets=targets) if any(
-                _is_dunder_all_subscript(target) for target in targets
-            ):
-                return True
-    return False
+    verifiable = {id(node) for node in _dunder_all_nodes(tree)}
+    return any(
+        id(node) not in verifiable and _refs_dunder_all(node) for node in _module_scope_stmts(tree)
+    )
 
 
 def _find_all_line(tree: ast.Module) -> int:
@@ -1188,7 +1214,7 @@ def _find_all_line(tree: ast.Module) -> int:
 
 
 def _dunder_all_names(
-    nodes: list[ast.Assign | ast.AnnAssign | ast.AugAssign],
+    nodes: tuple[ast.Assign | ast.AnnAssign | ast.AugAssign, ...],
 ) -> frozenset[str] | None:
     """Combine the names declared across ``__all__`` assignment statements.
 
@@ -1269,22 +1295,20 @@ def _is_within_package(filepath: Path, project_root: Path, src_roots: tuple[str,
     return False
 
 
-def _is_type_checking_if(node: ast.If) -> bool:
-    match node.test:
-        case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
-            return True
-        case _:
-            return False
-
-
-def _module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
-    """Yield every statement that executes at module scope at runtime.
+@cache
+def _module_scope_stmts(tree: ast.Module) -> tuple[ast.stmt, ...]:
+    """Return every statement that executes at module scope at runtime.
 
     Descends into runtime control-flow blocks (``if``/``try``/``with``/``for``/
     ``while``/``match``) so conditionally-executed statements are seen, but does
     not descend into nested function/class scopes (their bodies are not
     module-level). An ``if TYPE_CHECKING:`` body is skipped (type-only), but the
     ``else`` of such an ``if`` *does* run at runtime and is yielded.
+
+    Cached (keyed on the parsed tree) and materialised to a tuple because every
+    ``__all__``/local-name helper walks the same module; this turns the
+    several-walks-per-file cost into a single walk. Intentionally unbounded: the
+    checker is a short-lived CLI, not a long-lived server.
     """
 
     def _visit(body: list[ast.stmt]) -> Iterator[ast.stmt]:
@@ -1292,7 +1316,7 @@ def _module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
             yield node
             match node:
                 case ast.If():
-                    if not _is_type_checking_if(node):
+                    if not _is_type_checking_test(node.test):
                         yield from _visit(node.body)
                     yield from _visit(node.orelse)
                 case ast.Try():
@@ -1314,7 +1338,7 @@ def _module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
                     for match_case in cases:
                         yield from _visit(match_case.body)
 
-    yield from _visit(tree.body)
+    return tuple(_visit(tree.body))
 
 
 def _target_names(target: ast.expr) -> Iterator[tuple[str, int]]:
