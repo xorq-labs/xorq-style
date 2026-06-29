@@ -905,9 +905,14 @@ class InitReexportRule:
         if dunder_all is None:
             return
         local_names = _locally_defined_names(ctx.tree)
+        imported = _imported_names(ctx.tree)
         all_line = _find_all_line(ctx.tree)
         for name in sorted(dunder_all):
-            if name not in local_names:
+            # Flag only on positive proof of a re-export: the name is bound by an
+            # import and not rebound locally. A name we merely failed to find a
+            # local binding for (an unmodelled binding form, a typo) is left
+            # alone — the sound default is silence, not a false re-export.
+            if name in imported and name not in local_names:
                 yield ctx.violation(
                     all_line,
                     self.rule,
@@ -950,8 +955,8 @@ class InitAllRule:
         if not public_local:
             # Empty / comment-only / re-export-only __init__.py: nothing to require.
             return
-        nodes = _dunder_all_nodes(ctx.tree)
-        if not nodes:
+        present, dunder_all = _resolve_dunder_all(ctx.tree)
+        if not present:
             # Report at the first public definition so a trailing
             # `# xorq-style: disable=init-all` there suppresses it.
             yield ctx.violation(
@@ -961,10 +966,10 @@ class InitAllRule:
                 f" (define it listing: {', '.join(sorted(public_local))})",
             )
             return
-        dunder_all = _dunder_all_names(nodes)
         if dunder_all is None:
-            # __all__ is present but computed dynamically (not a static list/
-            # tuple of literals); we cannot verify completeness, so leave it.
+            # __all__ is present but unverifiable — computed dynamically, or
+            # mutated opaquely (`.extend(...)`, subscript assignment). We cannot
+            # verify completeness, so leave it alone rather than misreport.
             return
         for name in sorted(set(public_local) - dunder_all):
             yield ctx.violation(
@@ -1116,14 +1121,15 @@ def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
 def _dunder_all_nodes(
     tree: ast.Module,
 ) -> list[ast.Assign | ast.AnnAssign | ast.AugAssign]:
-    """Return every module-scope statement that binds ``__all__``.
+    """Return every module-scope statement that *assigns* ``__all__``.
 
     Recognises plain/multi-target assignment, annotated assignment (with a
     value) and augmented assignment (``__all__ += [...]``), and descends into
     runtime control-flow blocks via :func:`_module_scope_stmts` so a
     conditionally declared ``__all__`` is still seen. This keeps presence and
     contents symmetric with :func:`_locally_defined_names`, which walks the
-    same way.
+    same way. Opaque mutations (``.extend(...)``, subscript assignment) are not
+    assignments and are handled separately by :func:`_dunder_all_opaque`.
     """
     nodes: list[ast.Assign | ast.AnnAssign | ast.AugAssign] = []
     for node in _module_scope_stmts(tree):
@@ -1139,6 +1145,43 @@ def _dunder_all_nodes(
     return nodes
 
 
+def _is_dunder_all_subscript(node: ast.expr) -> bool:
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "__all__"
+    )
+
+
+def _dunder_all_opaque(tree: ast.Module) -> bool:
+    """True if ``__all__`` is mutated in a way that cannot be modelled statically.
+
+    A method call (``__all__.append(...)`` / ``.extend(...)``), subscript or
+    slice assignment (``__all__[i] = ...``), or ``del __all__[...]`` changes the
+    export list at runtime in ways a static scan cannot reconstruct. When this
+    happens ``__all__`` must be treated as unverifiable rather than trusting
+    whatever literal assignment was also seen — otherwise the completeness and
+    ``unlisted-import`` checks would flag names that are in fact exported. This
+    is the soundness rule: an ``__all__`` we cannot fully model produces no
+    findings.
+    """
+    for node in _module_scope_stmts(tree):
+        match node:
+            case ast.Expr(value=ast.Call(func=ast.Attribute(value=ast.Name(id="__all__")))):
+                return True
+            case ast.Assign(targets=targets) if any(
+                _is_dunder_all_subscript(target) for target in targets
+            ):
+                return True
+            case ast.AugAssign(target=target) if _is_dunder_all_subscript(target):
+                return True
+            case ast.Delete(targets=targets) if any(
+                _is_dunder_all_subscript(target) for target in targets
+            ):
+                return True
+    return False
+
+
 def _find_all_line(tree: ast.Module) -> int:
     nodes = _dunder_all_nodes(tree)
     return nodes[0].lineno if nodes else 1
@@ -1147,15 +1190,13 @@ def _find_all_line(tree: ast.Module) -> int:
 def _dunder_all_names(
     nodes: list[ast.Assign | ast.AnnAssign | ast.AugAssign],
 ) -> frozenset[str] | None:
-    """Combine the names declared across ``__all__`` binding statements.
+    """Combine the names declared across ``__all__`` assignment statements.
 
     Returns ``None`` when any binding's value is not a static list/tuple of
     string literals (it is computed dynamically), so completeness cannot be
-    verified. Callers distinguish "absent" (no nodes) from "dynamic" (``None``)
-    by checking :func:`_dunder_all_nodes` first.
+    verified. Assumes ``nodes`` is non-empty; callers use
+    :func:`_resolve_dunder_all` to distinguish "absent" from "dynamic".
     """
-    if not nodes:
-        return None
     names: set[str] = set()
     for node in nodes:
         value = node.value
@@ -1168,9 +1209,28 @@ def _dunder_all_names(
     return frozenset(names)
 
 
+def _resolve_dunder_all(tree: ast.Module) -> tuple[bool, frozenset[str] | None]:
+    """Classify a module's ``__all__`` as ``(present, names)``.
+
+    ``present`` is whether ``__all__`` is declared or mutated at all. ``names``
+    is the statically known set, or ``None`` when ``__all__`` is present but
+    unverifiable — a dynamic value or an opaque mutation (:func:`_dunder_all_opaque`).
+    Callers that only want the static set treat "absent" and "unverifiable"
+    alike (see :func:`_dunder_all_from_tree`); :class:`InitAllRule` needs the
+    distinction to choose between a presence and a completeness check.
+    """
+    if _dunder_all_opaque(tree):
+        return (True, None)
+    nodes = _dunder_all_nodes(tree)
+    if not nodes:
+        return (False, None)
+    return (True, _dunder_all_names(nodes))
+
+
 def _dunder_all_from_tree(tree: ast.Module) -> frozenset[str] | None:
-    """Extract the names in ``__all__`` from an already-parsed module."""
-    return _dunder_all_names(_dunder_all_nodes(tree))
+    """Static ``__all__`` names, or ``None`` if absent or unverifiable."""
+    present, names = _resolve_dunder_all(tree)
+    return names if present else None
 
 
 @cache
@@ -1257,30 +1317,113 @@ def _module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
     yield from _visit(tree.body)
 
 
+def _target_names(target: ast.expr) -> Iterator[tuple[str, int]]:
+    """Yield ``(name, lineno)`` for each simple name bound by an assignment-style
+    target, descending through tuple/list unpacking and starred targets.
+
+    Attribute (``obj.x``) and subscript (``obj[i]``) targets bind no module-scope
+    name and are skipped. Used for ``=``, ``for`` and ``with ... as`` targets
+    alike, so every one of them is covered by the same logic.
+    """
+    match target:
+        case ast.Name(id=name):
+            yield (name, target.lineno)
+        case ast.Tuple(elts=elts) | ast.List(elts=elts):
+            for elt in elts:
+                yield from _target_names(elt)
+        case ast.Starred(value=value):
+            yield from _target_names(value)
+
+
+def _match_capture_names(pattern: ast.pattern) -> Iterator[tuple[str, int]]:
+    """Yield ``(name, lineno)`` for each capture bound by a ``match`` pattern."""
+    match pattern:
+        case ast.MatchAs(pattern=sub, name=name):
+            if name is not None:
+                yield (name, pattern.lineno)
+            if sub is not None:
+                yield from _match_capture_names(sub)
+        case ast.MatchStar(name=name) if name is not None:
+            yield (name, pattern.lineno)
+        case ast.MatchMapping(patterns=patterns, rest=rest):
+            for sub in patterns:
+                yield from _match_capture_names(sub)
+            if rest is not None:
+                yield (rest, pattern.lineno)
+        case ast.MatchSequence(patterns=patterns) | ast.MatchOr(patterns=patterns):
+            for sub in patterns:
+                yield from _match_capture_names(sub)
+        case ast.MatchClass(patterns=patterns, kwd_patterns=kwd_patterns):
+            for sub in (*patterns, *kwd_patterns):
+                yield from _match_capture_names(sub)
+
+
+def _walrus_names(node: ast.AST) -> Iterator[tuple[str, int]]:
+    """Yield ``(name, lineno)`` for walrus (``:=``) targets in a statement's own
+    expressions.
+
+    Does not cross into nested statements (handled separately by
+    :func:`_module_scope_stmts`) nor into nested scopes (function, class,
+    lambda, comprehension), which bind in their own namespace.
+    """
+    for child in ast.iter_child_nodes(node):
+        match child:
+            case (
+                ast.Lambda()
+                | ast.ListComp()
+                | ast.SetComp()
+                | ast.DictComp()
+                | ast.GeneratorExp()
+                | ast.stmt()
+            ):
+                continue
+            case ast.NamedExpr(target=ast.Name(id=name)):
+                yield (name, child.target.lineno)
+                yield from _walrus_names(child)
+            case _:
+                yield from _walrus_names(child)
+
+
+def _imported_names(tree: ast.Module) -> frozenset[str]:
+    """Names bound at module scope by ``import`` / ``from ... import`` statements.
+
+    Used by :class:`InitReexportRule` as positive evidence that a name in
+    ``__all__`` is a re-export. ``if TYPE_CHECKING:`` imports are excluded by
+    :func:`_module_scope_stmts` (a type-only name cannot be exported at runtime).
+    """
+    names: set[str] = set()
+    for node in _module_scope_stmts(tree):
+        match node:
+            case ast.Import(names=aliases) | ast.ImportFrom(names=aliases):
+                for alias in aliases:
+                    if alias.name == "*":
+                        continue
+                    names.add(alias.asname or alias.name.split(".")[0])
+    return frozenset(names)
+
+
 def _locally_defined_names(tree: ast.Module) -> dict[str, int]:
     """Map each name bound at module scope to the line of its definition.
 
-    Covers ``def``/``async def``/``class`` and (possibly conditional)
-    module-level assignment, including tuple/list unpacking. Nested
-    function/class scopes and ``if TYPE_CHECKING:`` bodies are excluded by
-    :func:`_module_scope_stmts`. A bare annotation (``x: int`` with no value)
-    does not bind a runtime name, so it is not recorded.
+    Covers every runtime binding form reachable at module scope: ``def`` /
+    ``async def`` / ``class``; assignment (including tuple/list unpacking and
+    augmented assignment); ``for`` and ``with ... as`` targets; walrus (``:=``)
+    expressions; and ``match`` capture patterns. Nested function/class scopes
+    and ``if TYPE_CHECKING:`` bodies are excluded by :func:`_module_scope_stmts`.
+    A bare annotation (``x: int`` with no value) binds no runtime name and is
+    not recorded.
+
+    Extracting names generically — via :func:`_target_names`,
+    :func:`_match_capture_names` and :func:`_walrus_names` — rather than
+    enumerating a fixed set of assignment shapes keeps both consumers sound:
+    every binding form a module can use is reported, so :class:`InitReexportRule`
+    never mistakes a locally-bound name for a bare re-export.
     """
     names: dict[str, int] = {}
 
     def _record(name: str, lineno: int) -> None:
         if name != "__all__":
             names.setdefault(name, lineno)
-
-    def _record_target(target: ast.expr) -> None:
-        match target:
-            case ast.Name(id=name):
-                _record(name, target.lineno)
-            case ast.Tuple(elts=elts) | ast.List(elts=elts):
-                for elt in elts:
-                    _record_target(elt)
-            case ast.Starred(value=value):
-                _record_target(value)
 
     for node in _module_scope_stmts(tree):
         match node:
@@ -1292,9 +1435,26 @@ def _locally_defined_names(tree: ast.Module) -> dict[str, int]:
                 _record(name, node.lineno)
             case ast.Assign(targets=targets):
                 for target in targets:
-                    _record_target(target)
+                    for bound, lineno in _target_names(target):
+                        _record(bound, lineno)
             case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None:
                 _record(name, node.lineno)
+            case ast.AugAssign(target=ast.Name(id=name)):
+                _record(name, node.lineno)
+            case ast.For(target=target) | ast.AsyncFor(target=target):
+                for bound, lineno in _target_names(target):
+                    _record(bound, lineno)
+            case ast.With(items=items) | ast.AsyncWith(items=items):
+                for item in items:
+                    if item.optional_vars is not None:
+                        for bound, lineno in _target_names(item.optional_vars):
+                            _record(bound, lineno)
+            case ast.Match(cases=cases):
+                for case in cases:
+                    for bound, lineno in _match_capture_names(case.pattern):
+                        _record(bound, lineno)
+        for bound, lineno in _walrus_names(node):
+            _record(bound, lineno)
 
     return names
 

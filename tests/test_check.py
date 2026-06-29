@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import textwrap
 from typing import TYPE_CHECKING
 
@@ -2422,6 +2423,269 @@ def test_init_all_match_block_def_required(tmp_py: _WritePy) -> None:
     vs = [v for v in check(path) if v.rule == "init-all"]
     assert len(vs) == 1
     assert "`Pub`" in vs[0].msg
+
+
+# ---- init-all / init-reexport: soundness of __all__ resolution and local names ----
+#
+# These pin the policy that an __all__ the checker cannot fully model produces
+# no findings, and that every runtime binding form counts as locally defined.
+
+
+def test_init_all_extend_mutation_not_flagged(tmp_py: _WritePy) -> None:
+    # `__all__.extend(...)` mutates the export list in a way a static scan
+    # cannot reconstruct, so __all__ is unverifiable: completeness must not be
+    # checked (else `bar`, which IS exported at runtime, is a false positive).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__.extend(["bar"])
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_append_mutation_not_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__.append("bar")
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_subscript_assignment_not_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__[1:1] = ["bar"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_for_target_required(tmp_py: _WritePy) -> None:
+    # A module-level `for` binds its target as a public module attribute, so it
+    # is a real export and IS required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        for Item in (1, 2):
+            pass
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Item`" in vs[0].msg
+
+
+def test_init_all_with_target_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import contextlib
+
+        with contextlib.nullcontext() as Ctx:
+            pass
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Ctx`" in vs[0].msg
+
+
+def test_init_reexport_with_as_target_counts_as_local(tmp_py: _WritePy) -> None:
+    # `with ... as Resource` binds Resource locally, so listing it in __all__ of
+    # a non-__init__ module is NOT a bare re-export.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import make_ctx
+
+        with make_ctx() as Resource:
+            pass
+
+        __all__ = ["Resource"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_for_target_counts_as_local(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import items
+
+        for Item in items:
+            pass
+
+        __all__ = ["Item"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_walrus_target_counts_as_local(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import compute
+
+        if (Result := compute()):
+            pass
+
+        __all__ = ["Result"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_undefined_name_not_flagged(tmp_py: _WritePy) -> None:
+    # A name in __all__ that is neither imported nor locally defined is not a
+    # re-export (it is an undefined-name problem, out of this rule's scope).
+    # init-reexport flags only on positive proof of an import, so it stays
+    # silent here rather than guessing.
+    path = tmp_py("""\
+        from __future__ import annotations
+
+        __all__ = ["NeverDefined"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_unlisted_import_target_extend_all_skipped(tmp_path: Path) -> None:
+    # When the target module builds __all__ via `.extend(...)`, its export set
+    # is unverifiable, so unlisted-import must not flag imports from it.
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            def bar() -> None: ...
+            __all__ = ["foo"]
+            __all__.extend(["bar"])
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import bar
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+# Runtime oracle: import each fixture and confirm no name the init-all rule
+# reports as "missing from __all__" is in fact present in the module's real
+# runtime __all__. This is the soundness property checked against ground truth
+# instead of against the cases we remembered to enumerate — it fails if any
+# __all__ construction the static resolver mismodels slips a real export past
+# the completeness check.
+_ORACLE_FIXTURES = {
+    "static": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo", "bar"]
+    """,
+    "genuine_violation": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+    """,
+    "extend": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__.extend(["bar"])
+    """,
+    "append": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__.append("bar")
+    """,
+    "subscript": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__[1:1] = ["bar"]
+    """,
+    "augmented_static": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__ += ["bar"]
+    """,
+    "dynamic_concat": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"] + ["bar"]
+    """,
+    "conditional_union": """\
+        from __future__ import annotations
+        import sys
+        def foo() -> None: ...
+        def bar() -> None: ...
+        if sys.maxsize > 0:
+            __all__ = ["foo", "bar"]
+        else:
+            __all__ = ["foo"]
+    """,
+    "for_target": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        for Item in (1, 2):
+            pass
+        __all__ = ["foo", "Item"]
+    """,
+}
+
+
+@pytest.mark.parametrize("fixture", sorted(_ORACLE_FIXTURES), ids=sorted(_ORACLE_FIXTURES))
+def test_init_all_sound_against_runtime_all(fixture: str, tmp_py: _WritePy) -> None:
+    source = textwrap.dedent(_ORACLE_FIXTURES[fixture])
+
+    namespace: dict[str, object] = {}
+    exec(compile(source, "<oracle>", "exec"), namespace)
+    runtime_all = set(namespace.get("__all__", ()))  # type: ignore[arg-type]
+
+    path = tmp_py(source, name="__init__.py")
+    flagged = {
+        m.group(1)
+        for v in check(path)
+        if v.rule == "init-all" and v.msg.startswith("public name")
+        if (m := re.search(r"`([^`]+)`", v.msg))
+    }
+
+    # Never report a name as missing that is actually exported at runtime.
+    assert flagged.isdisjoint(runtime_all), (
+        f"{fixture}: flagged {flagged} but runtime __all__ exports {runtime_all}"
+    )
 
 
 # ---- unlisted-import ----
