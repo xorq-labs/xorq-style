@@ -2593,6 +2593,68 @@ def test_unlisted_import_target_extend_all_skipped(tmp_path: Path) -> None:
     assert "unlisted-import" not in _rules(check(path, config=config))
 
 
+def test_init_all_inverted_type_checking_guard_else_not_required(
+    tmp_py: _WritePy,
+) -> None:
+    # `if not TYPE_CHECKING:` inverts the branches: the body runs at runtime and
+    # the `else` is type-only. The checker cannot tell which branch is type-only
+    # for a non-canonical guard, so it must trust NEITHER — `Stub` (bound only in
+    # the type-only else) is not a runtime export and must not be required.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+
+        if not TYPE_CHECKING:
+            def real() -> None: ...
+        else:
+            class Stub: ...
+
+        __all__ = ["real"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_try_star_all_recognized(tmp_py: _WritePy) -> None:
+    # `__all__` declared inside a `try`/`except*` block is present at runtime; the
+    # module-scope walker must descend into except* handlers (structurally, not by
+    # an enumerated block list) so the presence check does not misreport it.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        try:
+            __all__ = ["foo"]
+        except* Exception:
+            __all__ = ["foo"]
+
+        def foo() -> None: ...
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_reexport_try_star_rebind_counts_as_local(tmp_py: _WritePy) -> None:
+    # A name rebound inside an `except*` handler at module scope counts as locally
+    # defined, so listing it in __all__ of a non-__init__ module is not a bare
+    # re-export. Pins that the walker reaches except* handler bodies.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        try:
+            pass
+        except* Exception:
+            Foo = None
+
+        __all__ = ["Foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
 # Runtime oracle: import each fixture and confirm no name the init-all rule
 # reports as "missing from __all__" is in fact present in the module's real
 # runtime __all__. This is the soundness property checked against ground truth

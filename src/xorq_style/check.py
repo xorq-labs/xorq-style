@@ -1098,22 +1098,37 @@ def _in_function(parents: tuple[ast.AST, ...]) -> bool:
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
-    """True if an ``if`` ``test`` references ``TYPE_CHECKING`` anywhere.
+    """True if an ``if`` ``test`` references ``TYPE_CHECKING`` *anywhere*.
 
     Recognises the bare ``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:`` guard
-    *and* any compound guard that mentions it (``if TYPE_CHECKING and ...:``). A
-    body under such a guard is type-only — ``TYPE_CHECKING`` is ``False`` at
-    runtime, so the branch never executes — and its bindings are not real
-    exports. Matching on *any* occurrence fails safe: an unrecognised compound
-    guard degrades to "treat as type-only" (a silent miss) rather than recording
-    phantom runtime names, which is the sound default for this checker. Keeping
-    the one shape-list here means the per-node (:func:`_module_scope_stmts`) and
-    parent-stack (:func:`_in_type_checking`) callers cannot drift apart.
+    *and* any compound or negated guard that mentions it (``if TYPE_CHECKING and
+    ...:``, ``if not TYPE_CHECKING:``). This is a coarse "is TYPE_CHECKING
+    involved at all" test; on its own it says nothing about *which* branch runs at
+    runtime. Callers that need that distinction pair it with
+    :func:`_is_canonical_type_checking_guard`. Keeping the one shape-list here
+    means the per-node (:func:`_module_scope_stmts`) and parent-stack
+    (:func:`_in_type_checking`) callers cannot drift apart.
     """
     for node in ast.walk(test):
         match node:
             case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
                 return True
+    return False
+
+
+def _is_canonical_type_checking_guard(test: ast.expr) -> bool:
+    """True only for the exact ``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:``.
+
+    This is the one guard whose runtime/type-only branch split is known: the body
+    is type-only and the ``else`` runs at runtime. A negated or compound guard
+    (``if not TYPE_CHECKING:``, ``if TYPE_CHECKING and ...:``) merely *mentions*
+    TYPE_CHECKING (:func:`_is_type_checking_test`) but does not tell us which
+    branch executes, so callers must treat it as fully unverifiable — trusting
+    either branch would risk requiring a phantom name from the wrong one.
+    """
+    match test:
+        case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
+            return True
     return False
 
 
@@ -1299,11 +1314,20 @@ def _is_within_package(filepath: Path, project_root: Path, src_roots: tuple[str,
 def _module_scope_stmts(tree: ast.Module) -> tuple[ast.stmt, ...]:
     """Return every statement that executes at module scope at runtime.
 
-    Descends into runtime control-flow blocks (``if``/``try``/``with``/``for``/
-    ``while``/``match``) so conditionally-executed statements are seen, but does
-    not descend into nested function/class scopes (their bodies are not
-    module-level). An ``if TYPE_CHECKING:`` body is skipped (type-only), but the
-    ``else`` of such an ``if`` *does* run at runtime and is yielded.
+    Descends into runtime control-flow blocks so conditionally-executed
+    statements are seen, but does not descend into nested function/class scopes
+    (their bodies are not module-level). An ``if TYPE_CHECKING:`` body is skipped
+    (type-only) while its ``else`` *does* run at runtime and is yielded; a guard
+    that mentions TYPE_CHECKING in any other shape (``if not TYPE_CHECKING:``,
+    ``if TYPE_CHECKING and ...:``) is unverifiable, so *both* branches are skipped
+    rather than risk trusting the wrong one.
+
+    Descent is driven by AST *structure*, not by an enumerated set of block
+    types: every nested statement body is followed — those held directly in a
+    statement's fields, and those one level down inside ``except``/``except*``
+    handlers and ``match`` cases. So ``try``/``try*``/``with``/``for``/``while``/
+    ``match`` and any future block node are all covered without naming them, and
+    no shape can silently drop out of scope.
 
     Cached (keyed on the parsed tree) and materialised to a tuple because every
     ``__all__``/local-name helper walks the same module; this turns the
@@ -1314,29 +1338,35 @@ def _module_scope_stmts(tree: ast.Module) -> tuple[ast.stmt, ...]:
     def _visit(body: list[ast.stmt]) -> Iterator[ast.stmt]:
         for node in body:
             yield node
-            match node:
-                case ast.If():
-                    if not _is_type_checking_test(node.test):
-                        yield from _visit(node.body)
-                    yield from _visit(node.orelse)
-                case ast.Try():
-                    yield from _visit(node.body)
-                    for handler in node.handlers:
-                        yield from _visit(handler.body)
-                    yield from _visit(node.orelse)
-                    yield from _visit(node.finalbody)
-                case ast.With(body=inner) | ast.AsyncWith(body=inner):
+            yield from _descend(node)
+
+    def _descend(node: ast.stmt) -> Iterator[ast.stmt]:
+        # Nested function/class scopes bind in their own namespace, not at module
+        # scope — yield the def/class itself (done by the caller) but do not enter.
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            return
+        if isinstance(node, ast.If):
+            # Canonical `if TYPE_CHECKING:` → body type-only (skip), else runtime.
+            # A non-canonical guard that still mentions TYPE_CHECKING → which
+            # branch runs is unknowable, so skip both (fail to silence). Anything
+            # unrelated to TYPE_CHECKING → both branches run, walk both.
+            if _is_canonical_type_checking_guard(node.test):
+                yield from _visit(node.orelse)
+            elif not _is_type_checking_test(node.test):
+                yield from _visit(node.body)
+                yield from _visit(node.orelse)
+            return
+        # Every other statement: follow nested statement bodies wherever they
+        # live, including the bodies of handler/case nodes (which are not
+        # themselves statements). This covers `try`/`try*` handlers and `match`
+        # cases without enumerating block types.
+        for child in ast.iter_child_nodes(node):
+            match child:
+                case ast.stmt():
+                    yield child
+                    yield from _descend(child)
+                case ast.ExceptHandler(body=inner) | ast.match_case(body=inner):
                     yield from _visit(inner)
-                case (
-                    ast.For(body=inner, orelse=otherwise)
-                    | ast.AsyncFor(body=inner, orelse=otherwise)
-                    | ast.While(body=inner, orelse=otherwise)
-                ):
-                    yield from _visit(inner)
-                    yield from _visit(otherwise)
-                case ast.Match(cases=cases):
-                    for match_case in cases:
-                        yield from _visit(match_case.body)
 
     return tuple(_visit(tree.body))
 
