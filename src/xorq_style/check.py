@@ -77,6 +77,7 @@ RULES: Mapping[RuleId, str] = types.MappingProxyType(
         RuleId.LEAF_ENUM_IMPORT: "enums.py modules must only import from stdlib and compat",
         RuleId.UNLISTED_IMPORT: "Imported name not listed in target module's __all__",
         RuleId.INIT_REEXPORT: "Non-__init__ module re-exports imported name via __all__",
+        RuleId.INIT_ALL: "__init__.py must declare __all__ listing all public local names",
     }
 )
 
@@ -900,11 +901,11 @@ class InitReexportRule:
         return tuple(self._check(ctx))
 
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
-        dunder_all = _extract_dunder_all(ctx.path)
+        dunder_all = _dunder_all_from_tree(ctx.tree)
         if dunder_all is None:
             return
         local_names = _locally_defined_names(ctx.tree)
-        all_line = self._find_all_line(ctx.tree)
+        all_line = _find_all_line(ctx.tree)
         for name in sorted(dunder_all):
             if name not in local_names:
                 yield ctx.violation(
@@ -913,15 +914,64 @@ class InitReexportRule:
                     f"`{name}` in __all__ is not locally defined (only __init__.py may re-export)",
                 )
 
-    @staticmethod
-    def _find_all_line(tree: ast.Module) -> int:
-        for node in ast.iter_child_nodes(tree):
-            match node:
-                case ast.Assign(targets=[ast.Name(id="__all__")]):
-                    return node.lineno
-                case ast.AnnAssign(target=ast.Name(id="__all__")):
-                    return node.lineno
-        return 1
+
+class InitAllRule:
+    """Enforce that ``__init__.py`` declares a complete ``__all__``.
+
+    Two checks, scoped only to files named ``__init__.py``:
+
+    1. Presence: a non-empty ``__init__.py`` (one that defines at least one
+       public local name) must declare ``__all__``.
+    2. Completeness: every public (non-underscore) name defined *locally*
+       (``def``/``async def``/``class``/module-level assignment) must appear in
+       ``__all__``.
+
+    Re-exported (imported) names are intentionally *not* required in ``__all__``
+    — re-exports remain optional in ``__init__.py``. Underscore-prefixed names
+    are private and never required. Intentional exclusions can be suppressed
+    with a trailing ``# xorq-style: disable=init-all`` comment.
+    """
+
+    rule = RuleId.INIT_ALL
+
+    def check(self, ctx: CheckContext) -> tuple[Violation, ...]:
+        if not ctx.enabled(self.rule):
+            return ()
+        if ctx.path.name != "__init__.py":
+            return ()
+        return tuple(self._check(ctx))
+
+    def _check(self, ctx: CheckContext) -> Iterator[Violation]:
+        public_local = {
+            name: line
+            for name, line in _locally_defined_names(ctx.tree).items()
+            if not name.startswith("_")
+        }
+        if not public_local:
+            # Empty / comment-only / re-export-only __init__.py: nothing to require.
+            return
+        nodes = _dunder_all_nodes(ctx.tree)
+        if not nodes:
+            # Report at the first public definition so a trailing
+            # `# xorq-style: disable=init-all` there suppresses it.
+            yield ctx.violation(
+                min(public_local.values()),
+                self.rule,
+                "non-empty __init__.py is missing __all__"
+                f" (define it listing: {', '.join(sorted(public_local))})",
+            )
+            return
+        dunder_all = _dunder_all_names(nodes)
+        if dunder_all is None:
+            # __all__ is present but computed dynamically (not a static list/
+            # tuple of literals); we cannot verify completeness, so leave it.
+            return
+        for name in sorted(set(public_local) - dunder_all):
+            yield ctx.violation(
+                public_local[name],
+                self.rule,
+                f"public name `{name}` is defined locally but missing from __all__",
+            )
 
 
 ALL_RULES: tuple[RuleChecker, ...] = (
@@ -951,6 +1001,7 @@ ALL_RULES: tuple[RuleChecker, ...] = (
     LeafEnumImportRule(),
     UnlistedImportRule(),
     InitReexportRule(),
+    InitAllRule(),
 )
 
 
@@ -1062,6 +1113,66 @@ def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
     return frozenset(names)
 
 
+def _dunder_all_nodes(
+    tree: ast.Module,
+) -> list[ast.Assign | ast.AnnAssign | ast.AugAssign]:
+    """Return every module-scope statement that binds ``__all__``.
+
+    Recognises plain/multi-target assignment, annotated assignment (with a
+    value) and augmented assignment (``__all__ += [...]``), and descends into
+    runtime control-flow blocks via :func:`_module_scope_stmts` so a
+    conditionally declared ``__all__`` is still seen. This keeps presence and
+    contents symmetric with :func:`_locally_defined_names`, which walks the
+    same way.
+    """
+    nodes: list[ast.Assign | ast.AnnAssign | ast.AugAssign] = []
+    for node in _module_scope_stmts(tree):
+        match node:
+            case ast.Assign(targets=targets) if any(
+                isinstance(target, ast.Name) and target.id == "__all__" for target in targets
+            ):
+                nodes.append(node)
+            case ast.AnnAssign(target=ast.Name(id="__all__"), value=value) if value is not None:
+                nodes.append(node)
+            case ast.AugAssign(target=ast.Name(id="__all__")):
+                nodes.append(node)
+    return nodes
+
+
+def _find_all_line(tree: ast.Module) -> int:
+    nodes = _dunder_all_nodes(tree)
+    return nodes[0].lineno if nodes else 1
+
+
+def _dunder_all_names(
+    nodes: list[ast.Assign | ast.AnnAssign | ast.AugAssign],
+) -> frozenset[str] | None:
+    """Combine the names declared across ``__all__`` binding statements.
+
+    Returns ``None`` when any binding's value is not a static list/tuple of
+    string literals (it is computed dynamically), so completeness cannot be
+    verified. Callers distinguish "absent" (no nodes) from "dynamic" (``None``)
+    by checking :func:`_dunder_all_nodes` first.
+    """
+    if not nodes:
+        return None
+    names: set[str] = set()
+    for node in nodes:
+        value = node.value
+        if value is None:
+            continue
+        extracted = _extract_all_names(value)
+        if extracted is None:
+            return None
+        names |= extracted
+    return frozenset(names)
+
+
+def _dunder_all_from_tree(tree: ast.Module) -> frozenset[str] | None:
+    """Extract the names in ``__all__`` from an already-parsed module."""
+    return _dunder_all_names(_dunder_all_nodes(tree))
+
+
 @cache
 def _extract_dunder_all(path: Path) -> frozenset[str] | None:
     try:
@@ -1069,13 +1180,7 @@ def _extract_dunder_all(path: Path) -> frozenset[str] | None:
         tree = ast.parse(source, filename=str(path))
     except (SyntaxError, UnicodeDecodeError, OSError):
         return None
-    for node in ast.iter_child_nodes(tree):
-        match node:
-            case ast.Assign(targets=[ast.Name(id="__all__")], value=value):
-                return _extract_all_names(value)
-            case ast.AnnAssign(target=ast.Name(id="__all__"), value=value) if value is not None:
-                return _extract_all_names(value)
-    return None
+    return _dunder_all_from_tree(tree)
 
 
 @cache
@@ -1104,21 +1209,94 @@ def _is_within_package(filepath: Path, project_root: Path, src_roots: tuple[str,
     return False
 
 
-def _locally_defined_names(tree: ast.Module) -> frozenset[str]:
-    names: set[str] = set()
-    for node in ast.iter_child_nodes(tree):
+def _is_type_checking_if(node: ast.If) -> bool:
+    match node.test:
+        case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
+            return True
+        case _:
+            return False
+
+
+def _module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
+    """Yield every statement that executes at module scope at runtime.
+
+    Descends into runtime control-flow blocks (``if``/``try``/``with``/``for``/
+    ``while``/``match``) so conditionally-executed statements are seen, but does
+    not descend into nested function/class scopes (their bodies are not
+    module-level). An ``if TYPE_CHECKING:`` body is skipped (type-only), but the
+    ``else`` of such an ``if`` *does* run at runtime and is yielded.
+    """
+
+    def _visit(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+        for node in body:
+            yield node
+            match node:
+                case ast.If():
+                    if not _is_type_checking_if(node):
+                        yield from _visit(node.body)
+                    yield from _visit(node.orelse)
+                case ast.Try():
+                    yield from _visit(node.body)
+                    for handler in node.handlers:
+                        yield from _visit(handler.body)
+                    yield from _visit(node.orelse)
+                    yield from _visit(node.finalbody)
+                case ast.With(body=inner) | ast.AsyncWith(body=inner):
+                    yield from _visit(inner)
+                case (
+                    ast.For(body=inner, orelse=otherwise)
+                    | ast.AsyncFor(body=inner, orelse=otherwise)
+                    | ast.While(body=inner, orelse=otherwise)
+                ):
+                    yield from _visit(inner)
+                    yield from _visit(otherwise)
+                case ast.Match(cases=cases):
+                    for match_case in cases:
+                        yield from _visit(match_case.body)
+
+    yield from _visit(tree.body)
+
+
+def _locally_defined_names(tree: ast.Module) -> dict[str, int]:
+    """Map each name bound at module scope to the line of its definition.
+
+    Covers ``def``/``async def``/``class`` and (possibly conditional)
+    module-level assignment, including tuple/list unpacking. Nested
+    function/class scopes and ``if TYPE_CHECKING:`` bodies are excluded by
+    :func:`_module_scope_stmts`. A bare annotation (``x: int`` with no value)
+    does not bind a runtime name, so it is not recorded.
+    """
+    names: dict[str, int] = {}
+
+    def _record(name: str, lineno: int) -> None:
+        if name != "__all__":
+            names.setdefault(name, lineno)
+
+    def _record_target(target: ast.expr) -> None:
+        match target:
+            case ast.Name(id=name):
+                _record(name, target.lineno)
+            case ast.Tuple(elts=elts) | ast.List(elts=elts):
+                for elt in elts:
+                    _record_target(elt)
+            case ast.Starred(value=value):
+                _record_target(value)
+
+    for node in _module_scope_stmts(tree):
         match node:
-            case ast.FunctionDef(name=name) | ast.AsyncFunctionDef(name=name):
-                names.add(name)
-            case ast.ClassDef(name=name):
-                names.add(name)
+            case (
+                ast.FunctionDef(name=name)
+                | ast.AsyncFunctionDef(name=name)
+                | ast.ClassDef(name=name)
+            ):
+                _record(name, node.lineno)
             case ast.Assign(targets=targets):
                 for target in targets:
-                    if isinstance(target, ast.Name) and target.id != "__all__":
-                        names.add(target.id)
-            case ast.AnnAssign(target=ast.Name(id=name)) if name != "__all__":
-                names.add(name)
-    return frozenset(names)
+                    _record_target(target)
+            case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None:
+                _record(name, node.lineno)
+
+    return names
 
 
 def _top_modules(node: ast.AST) -> tuple[str, ...]:

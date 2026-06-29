@@ -110,6 +110,7 @@ The `--disable` option supports tab completion for rule names, including comma-s
 | `type-annotations` | Functions must have type annotations |
 | `unlisted-import` | Imported name not listed in target module's `__all__` |
 | `init-reexport` | Non-`__init__` module re-exports imported name via `__all__` |
+| `init-all` | `__init__.py` must declare `__all__` listing all public local names |
 
 ## Configuration
 
@@ -155,4 +156,14 @@ Multiple rules can be comma-separated:
 
 ```python
 import os.path  # xorq-style: disable=os-path,deferred-stdlib
+```
+
+The comment goes on the line the rule reports. For `init-all`, that is the
+public definition itself, so a deliberately internal name is excluded from
+`__all__` by annotating its definition (not the `__all__` line):
+
+```python
+def wrapped_do_connect() -> None: ...  # xorq-style: disable=init-all
+
+__all__ = ["connect"]
 ```

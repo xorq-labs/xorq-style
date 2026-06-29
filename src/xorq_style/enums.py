@@ -30,3 +30,4 @@ class RuleId(StrEnum):
     LEAF_ENUM_IMPORT = "leaf-enum-import"
     UNLISTED_IMPORT = "unlisted-import"
     INIT_REEXPORT = "init-reexport"
+    INIT_ALL = "init-all"

@@ -2023,6 +2023,27 @@ def test_init_reexport_assignment_counts_as_local(tmp_py: _WritePy) -> None:
     assert "init-reexport" not in _rules(check(path))
 
 
+def test_init_reexport_runtime_block_assignment_counts_as_local(
+    tmp_py: _WritePy,
+) -> None:
+    # _locally_defined_names recurses into runtime control-flow blocks, so a
+    # name rebound inside a try/except (or if/with/for/while) at module scope
+    # counts as locally defined and is NOT treated as a bare re-export. This
+    # pins the relaxation introduced alongside init-all.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo, wrap
+
+        try:
+            Foo = wrap(Foo)
+        except Exception:
+            pass
+
+        __all__ = ["Foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
 def test_init_reexport_starred_all_skipped(tmp_py: _WritePy) -> None:
     path = tmp_py("""\
         from __future__ import annotations
@@ -2043,6 +2064,364 @@ def test_init_reexport_violation_line(tmp_py: _WritePy) -> None:
     vs = [v for v in check(path) if v.rule == "init-reexport"]
     assert len(vs) == 1
     assert vs[0].line == 4
+
+
+# ---- init-all ----
+
+
+def test_init_all_missing_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" in _rules(check(path))
+
+
+def test_init_all_complete_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+
+        BAZ = 42
+
+        __all__ = ["foo", "Bar", "BAZ"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_incomplete_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "Bar" in vs[0].msg
+    # Reported at Bar's definition (line 5), not the __all__ line, so the
+    # violation lands on a changed line under --diff and points at the culprit.
+    assert vs[0].line == 5
+
+
+def test_init_all_underscore_names_not_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        def _private() -> None: ...
+
+        _CONST = 1
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_reexports_not_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Imported
+
+        def foo() -> None: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_non_init_file_ignored(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+        """,
+        name="mod.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_disable_comment_suppresses_presence(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        "from __future__ import annotations\n"
+        "def foo() -> None: ...  # xorq-style: disable=init-all\n",
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_disable_comment_suppresses_completeness(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...  # xorq-style: disable=init-all
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_dynamic_all_not_flagged(tmp_py: _WritePy) -> None:
+    # __all__ present but computed (concat / sorted) — cannot be statically
+    # verified, so it must NOT be reported as "missing __all__".
+    for value in ('["foo"] + ["bar"]', 'sorted(["foo", "bar"])'):
+        path = tmp_py(
+            "from __future__ import annotations\n"
+            "def foo() -> None: ...\n"
+            "def bar() -> None: ...\n"
+            f"__all__ = {value}\n",
+            name="__init__.py",
+        )
+        assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_tuple_unpacking_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        a, b = 1, 2
+
+        __all__ = ["a"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`b`" in vs[0].msg
+
+
+def test_init_all_nested_runtime_def_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        try:
+            def foo() -> None: ...
+        except Exception:
+            foo = None
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`foo`" in vs[0].msg
+
+
+def test_init_all_type_checking_names_not_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            class Stub: ...
+
+        def foo() -> None: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_diff_mode_flags_new_name(tmp_py: _WritePy) -> None:
+    # A new public name added without touching __all__ must still be flagged
+    # under --diff, because the violation lands on the new definition's line.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def newfunc() -> None: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path, only_lines=frozenset({4})) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "newfunc" in vs[0].msg
+    assert vs[0].line == 4
+
+
+def test_init_all_empty_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("", name="__init__.py")
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_comment_only_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        # this package re-exports nothing of its own
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_reexport_only_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Foo
+
+        __all__ = ["Foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_augmented_all_recognized(tmp_py: _WritePy) -> None:
+    # Names added via `__all__ += [...]` are listed at runtime and must not be
+    # reported as missing.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__ += ["bar"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_bare_annotation_not_required(tmp_py: _WritePy) -> None:
+    # A bare annotation (`x: int` with no value) does not bind a runtime name,
+    # so it cannot be exported and must not be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        x: int
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_conditional_all_recognized(tmp_py: _WritePy) -> None:
+    # __all__ assigned inside a runtime block is present, not absent — the
+    # presence check must not report it as missing.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        try:
+            __all__ = ["foo"]
+        except Exception:
+            __all__ = []
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_multi_target_all_recognized(tmp_py: _WritePy) -> None:
+    # `__all__ = _alias = [...]` declares __all__ (a multi-target assignment),
+    # so the presence check must not report it as missing. The aliased target
+    # here is underscore-private, so completeness is satisfied too.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        __all__ = _alias = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_type_checking_else_required(tmp_py: _WritePy) -> None:
+    # The `else` of an `if TYPE_CHECKING:` runs at runtime, so a public name it
+    # binds is a real export and must be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            Stub = int
+        else:
+            def Real() -> None: ...
+
+        __all__ = ["Stub"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Real`" in vs[0].msg
+
+
+def test_init_all_match_block_def_required(tmp_py: _WritePy) -> None:
+    # Names bound inside a module-level `match`/`case` block run at runtime and
+    # must be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        match 1:
+            case 1:
+                Pub = 2
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Pub`" in vs[0].msg
 
 
 # ---- unlisted-import ----
