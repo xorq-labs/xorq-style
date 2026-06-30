@@ -22,7 +22,9 @@ from xorq_style.check import (
     Violation,
     _changed_lines,
     _hook,
+    _mutates_dunder_all,
     _parse_unified_diff,
+    _type_checking_value,
     _violation_to_dict,
     check,
     load_config,
@@ -2667,6 +2669,76 @@ def test_build_module_scope_classifies_every_statement_type() -> None:
     )
 
 
+def test_type_checking_guard_folds_every_boolean_operator() -> None:
+    # Structural guard for the SECOND churn model — how a `TYPE_CHECKING` guard
+    # evaluates. `_type_checking_value` folds a hand-listed set of boolean and
+    # comparison shapes, and the branch history shows it grew one operator at a
+    # time (`not`/`and`/`or`, then identity/equality in a later "close N gaps"
+    # commit). Enumerate every boolean/comparison operator the language has and
+    # assert each is CONSCIOUSLY either folded (the guard's runtime value is known)
+    # or left opaque (value unknown -> fail to silence). A future operator lands in
+    # neither set and fails here, the same forcing function the statement guard
+    # applies. The behavioral half ensures the declared lists cannot drift from
+    # `_type_checking_value`'s actual folding.
+    folded = {ast.Not, ast.And, ast.Or, ast.Is, ast.IsNot, ast.Eq, ast.NotEq}
+    opaque = {ast.UAdd, ast.USub, ast.Invert, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn}
+    declared = folded | opaque
+    actual = _all_subclasses(ast.unaryop) | _all_subclasses(ast.boolop) | _all_subclasses(ast.cmpop)
+    unclassified = {c.__name__ for c in actual - declared}
+    assert not unclassified, (
+        f"unclassified operator types {unclassified}: decide in _type_checking_value "
+        "whether a TYPE_CHECKING guard built from each folds to a known value or "
+        "stays opaque (fail to silence)"
+    )
+
+    tc = ast.Name(id="TYPE_CHECKING", ctx=ast.Load())
+    true = ast.Constant(value=True)
+
+    def _guard(op: type) -> ast.expr:
+        if issubclass(op, ast.unaryop):
+            return ast.UnaryOp(op=op(), operand=tc)
+        if issubclass(op, ast.boolop):
+            # Both operands must be foldable for `and`/`or` to have a known value;
+            # `_type_checking_value` folds a TYPE_CHECKING ref but not a bare literal
+            # operand (only the Compare path reads constants).
+            return ast.BoolOp(op=op(), values=[tc, tc])
+        return ast.Compare(left=tc, ops=[op()], comparators=[true])
+
+    for op in folded:
+        assert _type_checking_value(_guard(op)) is not None, op.__name__
+    for op in opaque:
+        assert _type_checking_value(_guard(op)) is None, op.__name__
+
+
+def test_mutates_dunder_all_shape_set_pinned() -> None:
+    # Structural guard for the THIRD churn model — how __all__ is resolved. Pins
+    # the exact set of shapes `_mutates_dunder_all` treats as an unverifiable
+    # in-place mutation vs. leaves alone, so a change to the classifier (or a new
+    # mutation form) must update this catalog consciously instead of silently
+    # flipping a module between verifiable and opaque.
+    mutates = [
+        "__all__.append('x')",
+        "__all__.extend(['x'])",
+        "__all__.sort()",
+        "__all__[0] = 'x'",
+        "__all__[1:1] = ['x']",
+        "del __all__[0]",  # del-subscript
+    ]
+    inert = [
+        "__all__ = ['x']",  # whole-name rebind, recoverable
+        "__all__: list[str]",  # bare annotation, binds no value
+        "for _n in __all__: pass",  # bare read
+        "x = len(__all__)",  # bare read
+        "_x, __all__ = 1, ['a']",  # unpacking handled in _build_module_scope, not here
+    ]
+    for src in mutates:
+        node = ast.parse(textwrap.dedent(src)).body[0]
+        assert _mutates_dunder_all(node), src
+    for src in inert:
+        node = ast.parse(textwrap.dedent(src)).body[0]
+        assert not _mutates_dunder_all(node), src
+
+
 # ---- init-all / init-reexport: soundness of __all__ resolution and local names ----
 #
 # These pin the policy that an __all__ the checker cannot fully model produces
@@ -3003,6 +3075,63 @@ def test_init_reexport_branch_conditional_all_not_flagged(tmp_py: _WritePy) -> N
             __all__ = []
     """)
     assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_single_conditional_all_not_flagged(tmp_py: _WritePy) -> None:
+    # A SINGLE __all__ assignment that is nested in a runtime `if` branch (no else)
+    # is still branch-conditional: it may never execute, so it does not provably
+    # establish the export set. `dunder_all_exact` must be None (gated on the
+    # assignment being unconditional, not merely the only one), so init-reexport
+    # stays silent instead of flagging `foo` off a conditionally-built __all__.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import os
+        from bar import foo
+
+        if os.name == "nt":
+            __all__ = ["foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_all_mutually_exclusive_branches_not_required(tmp_py: _WritePy) -> None:
+    # A public name bound in only one arm of a mutually-exclusive `if`/`else` is
+    # not a guaranteed export — at most one arm runs — so requiring BOTH in __all__
+    # would be a false positive that no single __all__ can satisfy on every
+    # platform. Only the unconditionally-bound names are required; here `__all__`
+    # listing just the one for this platform is clean.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import sys
+
+        if sys.platform == "win32":
+            win = 1
+        else:
+            posix = 1
+
+        __all__ = ["win"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_tuple_unpacked_all_recognized(tmp_py: _WritePy) -> None:
+    # `__all__` bound by tuple unpacking is present (its value just isn't a literal
+    # we can read), so it is unverifiable rather than absent — the presence check
+    # must not report a "missing __all__" false positive.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def a() -> None: ...
+
+        __all__, _x = ["a"], 1
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
 
 
 # Runtime oracle: import each fixture and confirm no name the init-all rule
