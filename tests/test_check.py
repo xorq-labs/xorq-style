@@ -2401,6 +2401,65 @@ def test_init_all_bare_annotation_not_required(tmp_py: _WritePy) -> None:
     assert "init-all" not in _rules(check(path))
 
 
+def test_init_all_bare_dunder_all_annotation_is_absent(tmp_py: _WritePy) -> None:
+    # `__all__: list[str]` (no value) binds no runtime `__all__`, so it is absent,
+    # not "present but unverifiable". The presence check must still fire.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        __all__: list[str]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`foo`" in vs[0].msg
+
+
+def test_init_all_def_shadowing_import_required(tmp_py: _WritePy) -> None:
+    # A name locally *defined* by def/class is a genuine new object and must be
+    # listed, even when it happens to share a name with an import (here `json`,
+    # bound by `import json.decoder`).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import json.decoder
+
+        def json() -> None: ...
+
+        __all__: list[str] = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`json`" in vs[0].msg
+
+
+def test_init_all_import_rebound_by_assignment_not_required(tmp_py: _WritePy) -> None:
+    # The optional-dependency idiom rebinds an imported name by *assignment*; it
+    # stays a re-export and is not required (the def/class override does not apply
+    # to assignment rebinds).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Foo
+
+        try:
+            Foo = Foo
+        except Exception:
+            Foo = None
+
+        __all__: list[str] = []
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
 def test_init_all_conditional_all_recognized(tmp_py: _WritePy) -> None:
     # __all__ assigned inside a runtime block is present, not absent — the
     # presence check must not report it as missing.
