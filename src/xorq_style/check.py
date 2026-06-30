@@ -127,16 +127,23 @@ class _ModuleScope:
     definitions: frozenset[str]  # subset bound by def / async def / class
     imported: frozenset[str]  # names bound by import / from-import (excludes `*`)
     dunder_all_present: bool  # __all__ is *assigned* at runtime (not merely referenced)
-    dunder_all_names: frozenset[str] | None  # known set, or None when unverifiable
+    dunder_all_names: frozenset[str] | None  # over-approx union, or None when unverifiable
+    dunder_all_exact: frozenset[str] | None  # names provably exported, or None when ambiguous
     all_line: int  # line to report __all__-level findings at (1 if absent)
 
     @property
     def dunder_all_static(self) -> frozenset[str] | None:
-        """Static ``__all__`` names, or ``None`` if absent or unverifiable.
+        """Over-approximating static ``__all__`` names, or ``None`` if absent or
+        unverifiable.
 
-        Callers that cannot act on a partial export set (``init-reexport``,
-        ``unlisted-import``) treat absent and unverifiable alike; ``init-all``
-        needs :attr:`dunder_all_present` to tell a missing ``__all__`` from an
+        This is the *union* across every static ``__all__`` assignment, so it can
+        only over-state the runtime export set. That is the sound direction for
+        ``unlisted-import`` (never wrongly rejects an in-``__all__`` import) and
+        ``init-all`` completeness (never wrongly requires a name). It is *not*
+        sound for ``init-reexport``, which needs proof a name **is** exported —
+        that consumer uses :attr:`dunder_all_exact`. Callers that cannot act on a
+        partial set treat absent and unverifiable alike; ``init-all`` needs
+        :attr:`dunder_all_present` to tell a missing ``__all__`` from an
         unverifiable one.
         """
         return self.dunder_all_names if self.dunder_all_present else None
@@ -933,7 +940,12 @@ class InitReexportRule:
 
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
         scope = ctx.scope
-        dunder_all = scope.dunder_all_static
+        # Use the *exact* export set, not the over-approximating union: a name is
+        # flagged as a wrongful re-export only when we can prove it is in the
+        # runtime ``__all__``. A reassigned or branch-conditional ``__all__`` is
+        # ambiguous (``dunder_all_exact is None``) and produces no finding, so the
+        # union's surplus names never become false re-export flags.
+        dunder_all = scope.dunder_all_exact
         if dunder_all is None:
             return
         for name in sorted(dunder_all):
@@ -1250,23 +1262,61 @@ def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
     return frozenset(names)
 
 
-def _refs_dunder_all(node: ast.AST) -> bool:
-    """True if the name ``__all__`` is referenced in ``node``'s *own* expressions.
+def _calls_method_on_dunder_all(node: ast.AST) -> bool:
+    """True if ``node``'s *own* expressions call a method on ``__all__``.
 
-    Does not descend into nested statements — those are visited separately by
-    :func:`_iter_module_scope_stmts` — so a container statement (``try``/``if``/...)
-    that merely encloses an ``__all__`` assignment does not itself count as a
-    reference.
+    Catches in-place mutations such as ``__all__.append(...)`` / ``.extend(...)``
+    (and, conservatively, any other method like ``.sort()``) wherever they sit in
+    the statement's expressions. Does not descend into nested statements — those
+    are visited separately by :func:`_iter_module_scope_stmts` — and a plain read
+    of ``__all__`` (``for x in __all__``, ``len(__all__)``) is not a method call,
+    so it does not match.
     """
     for child in ast.iter_child_nodes(node):
         match child:
             case ast.stmt():
                 continue
-            case ast.Name(id="__all__"):
+            case ast.Call(func=ast.Attribute(value=ast.Name(id="__all__"))):
                 return True
             case _:
-                if _refs_dunder_all(child):
+                if _calls_method_on_dunder_all(child):
                     return True
+    return False
+
+
+def _is_dunder_all_subscript(target: ast.expr) -> bool:
+    """True if ``target`` is a subscript/slice or attribute of ``__all__``.
+
+    These are assignment/``del`` targets that mutate ``__all__`` in place
+    (``__all__[i] = ...``, ``__all__[1:1] = ...``, ``del __all__[i]``) rather than
+    rebinding the whole name.
+    """
+    match target:
+        case (
+            ast.Subscript(value=ast.Name(id="__all__"))
+            | ast.Attribute(value=ast.Name(id="__all__"))
+        ):
+            return True
+    return False
+
+
+def _mutates_dunder_all(node: ast.stmt) -> bool:
+    """True if ``node`` mutates ``__all__`` in place rather than (re)binding it.
+
+    A genuine mutation the checker cannot statically reconstruct — a method call
+    (``.append``/``.extend``/...), or a subscript/slice assignment or ``del`` on
+    ``__all__`` — leaves the export set unverifiable. A bare *read* (iterating it,
+    ``len(__all__)``, ``x in __all__``) or a bare annotation (``__all__: list[str]``)
+    is not a mutation and does not match, so a module that merely inspects its own
+    ``__all__`` keeps a statically-known export set.
+    """
+    if _calls_method_on_dunder_all(node):
+        return True
+    match node:
+        case ast.Assign(targets=targets) | ast.Delete(targets=targets):
+            return any(_is_dunder_all_subscript(t) for t in targets)
+        case ast.AugAssign(target=target) | ast.AnnAssign(target=target):
+            return _is_dunder_all_subscript(target)
     return False
 
 
@@ -1301,15 +1351,22 @@ def _build_module_scope(tree: ast.Module) -> _ModuleScope:
     process-lifetime cache, so nothing is retained past the file.
 
     ``__all__`` is classified in three states. It is **absent** unless an actual
-    assignment binds it (a bare annotation ``__all__: list[str]``, a stray read,
-    or ``del __all__`` references the name but creates no runtime value, so they
-    do not count as present). When an assignment exists but ``__all__`` is also
-    touched opaquely (``.extend(...)``/``.append(...)``, subscript or slice
-    assignment, ``del``) or any assigned value is dynamic, it is **unverifiable**
-    (``names is None``). Otherwise the union of the assigned literals is the
-    **known** export set. Binding names are extracted generically via
-    :func:`_target_names` / :func:`_match_capture_names` / :func:`_walrus_names`
-    so every binding form a module can use is covered, not an enumerated subset.
+    assignment binds it (a bare annotation ``__all__: list[str]`` or a stray read
+    references the name but creates no runtime value, so they do not count as
+    present). When an assignment exists but ``__all__`` is also *mutated* in a way
+    a static scan cannot reconstruct (``.extend(...)``/``.append(...)``, subscript
+    or slice assignment, ``del __all__``) or any assigned value is dynamic, it is
+    **unverifiable** (``dunder_all_names is None``). Otherwise the union of the
+    assigned literals is the **known** over-approximating set; the **exact** set
+    (:attr:`_ModuleScope.dunder_all_exact`, for ``init-reexport``) is that union
+    only when a single assignment establishes it, else ``None``. A bare read of
+    ``__all__`` (iterating it, ``len(__all__)``) is deliberately not treated as a
+    mutation, so it does not poison an otherwise-static set.
+
+    Binding names are extracted generically via :func:`_target_names` /
+    :func:`_match_capture_names` / :func:`_walrus_names` so every binding form a
+    module can use is covered, not an enumerated subset; a module-scope ``del``
+    unbinds the name again.
     """
     local_names: dict[str, int] = {}
     definitions: set[str] = set()
@@ -1354,6 +1411,20 @@ def _build_module_scope(tree: ast.Module) -> _ModuleScope:
                     is_all_assign = True
                 else:
                     _record(name, node.lineno)
+            case ast.Delete(targets=del_targets):
+                for del_target in del_targets:
+                    match del_target:
+                        case ast.Name(id="__all__"):
+                            # Deleting __all__ wholesale leaves its runtime state
+                            # unknowable — fail closed to "unverifiable" below.
+                            opaque = True
+                        case ast.Name(id=del_name):
+                            # A module-scope `del` unbinds the name, so it is no
+                            # longer a runtime export (or a re-export). Without
+                            # this, init-all would require a deleted name.
+                            local_names.pop(del_name, None)
+                            definitions.discard(del_name)
+                            imported.discard(del_name)
             case ast.For(target=target) | ast.AsyncFor(target=target):
                 for bound, lineno in _target_names(target):
                     _record(bound, lineno)
@@ -1368,17 +1439,23 @@ def _build_module_scope(tree: ast.Module) -> _ModuleScope:
                         _record(bound, lineno)
         for bound, lineno in _walrus_names(node):
             _record(bound, lineno)
-        # Any reference to __all__ outside a recognised whole-name assignment is
-        # an opaque mutation we cannot model — fail closed (see _ModuleScope).
-        if not is_all_assign and _refs_dunder_all(node):
+        # An in-place mutation of __all__ outside a recognised whole-name
+        # assignment (`.append`/`.extend`, subscript/slice assignment, `del
+        # __all__[...]`) we cannot reconstruct — fail closed (see _ModuleScope).
+        if not is_all_assign and _mutates_dunder_all(node):
             opaque = True
 
     if not all_nodes:
-        present, names = False, None
+        present, names, exact = False, None, None
     elif opaque:
-        present, names = True, None
+        present, names, exact = True, None, None
     else:
-        present, names = True, _combine_all_names(all_nodes)
+        present = True
+        names = _combine_all_names(all_nodes)
+        # The exact runtime export set is knowable only from a single static
+        # assignment; any reassignment or branch-conditional __all__ makes the
+        # final value ambiguous, so init-reexport must not rely on the union.
+        exact = names if len(all_nodes) == 1 else None
 
     return _ModuleScope(
         local_names=local_names,
@@ -1386,6 +1463,11 @@ def _build_module_scope(tree: ast.Module) -> _ModuleScope:
         imported=frozenset(imported),
         dunder_all_present=present,
         dunder_all_names=names,
+        dunder_all_exact=exact,
+        # init-reexport (the only consumer) fires only when `exact` is known, which
+        # requires a single __all__ assignment — so this is always that one node's
+        # line. With 2+ assignments `exact` is None and the rule stays silent, so
+        # the line never shifts onto an unchanged-under-`--diff` nested assignment.
         all_line=all_nodes[0].lineno if all_nodes else 1,
     )
 

@@ -2791,6 +2791,114 @@ def test_init_reexport_try_star_rebind_counts_as_local(tmp_py: _WritePy) -> None
     assert "init-reexport" not in _rules(check(path))
 
 
+def test_init_all_read_of_dunder_all_keeps_completeness(tmp_py: _WritePy) -> None:
+    # A bare *read* of __all__ (iterating it) is not an in-place mutation, so a
+    # static __all__ stays verifiable and a genuinely-missing public name is still
+    # flagged. Pins that opacity is restricted to mutations, not any reference.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def missing() -> None: ...
+
+        __all__ = ["foo"]
+        for _name in __all__:
+            pass
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`missing`" in vs[0].msg
+
+
+def test_init_all_split_annotation_keeps_completeness(tmp_py: _WritePy) -> None:
+    # A bare `__all__: list[str]` annotation followed by a real static assignment
+    # is verifiable (the annotation is not a mutation), so completeness still runs.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def missing() -> None: ...
+
+        __all__: list[str]
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`missing`" in vs[0].msg
+
+
+def test_init_all_del_of_public_local_not_required(tmp_py: _WritePy) -> None:
+    # A module-scope `del` unbinds the name, so it is not a runtime module
+    # attribute and init-all must not require it in __all__ (was a false positive).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        helper = 1
+        del helper
+        kept = 2
+
+        __all__ = ["kept"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_reexport_del_of_imported_name_not_flagged(tmp_py: _WritePy) -> None:
+    # `del` of an imported name removes it from the re-export set, so listing a
+    # *different* local name in __all__ is clean.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import gone
+
+        del gone
+        kept = 1
+
+        __all__ = ["kept"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_reassigned_all_not_flagged(tmp_py: _WritePy) -> None:
+    # __all__ reassigned: only the last value is the runtime export set, so a name
+    # present only in a superseded assignment is not a re-export and must not be
+    # flagged (the union would wrongly include it).
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import bar
+
+        __all__ = ["bar"]
+        __all__ = ["baz"]
+
+        baz = 1
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_branch_conditional_all_not_flagged(tmp_py: _WritePy) -> None:
+    # __all__ assigned only inside runtime branches is ambiguous (no single static
+    # assignment), so init-reexport stays silent rather than trusting the union of
+    # both branches — `bar` is exported on at most one of them.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import sys
+        from other import bar
+
+        if sys.version_info >= (3, 99):
+            __all__ = ["bar"]
+        else:
+            __all__ = []
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
 # Runtime oracle: import each fixture and confirm no name the init-all rule
 # reports as "missing from __all__" is in fact present in the module's real
 # runtime __all__. This is the soundness property checked against ground truth
