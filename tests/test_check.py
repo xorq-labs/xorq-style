@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
 import io
 import json
+import re
+import sys
 import textwrap
 from typing import TYPE_CHECKING
 
@@ -19,7 +22,9 @@ from xorq_style.check import (
     Violation,
     _changed_lines,
     _hook,
+    _mutates_dunder_all,
     _parse_unified_diff,
+    _type_checking_value,
     _violation_to_dict,
     check,
     load_config,
@@ -1176,6 +1181,108 @@ def test_stdlib_logging_in_type_checking_ok(tmp_py: _WritePy) -> None:
     assert "stdlib-logging" not in _rules(check(path))
 
 
+def test_stdlib_logging_in_not_type_checking_flagged(tmp_py: _WritePy) -> None:
+    # `if not TYPE_CHECKING:` is a RUNTIME block — the import actually runs, so it
+    # must be flagged. Pins the branch-aware classifier against the regression
+    # where any guard merely mentioning TYPE_CHECKING was treated as type-only.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if not TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_in_unrelated_type_checking_attr_flagged(tmp_py: _WritePy) -> None:
+    # `config.TYPE_CHECKING` is an unrelated attribute, not the typing sentinel, so
+    # the block runs at runtime and the import must be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import config
+        if config.TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_in_qualified_type_checking_ok(tmp_py: _WritePy) -> None:
+    # `typing.TYPE_CHECKING` is the sentinel in qualified form and must be exempt.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import typing
+        if typing.TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_and_compound_ok(tmp_py: _WritePy) -> None:
+    # `if TYPE_CHECKING and ...:` body never runs at runtime (TYPE_CHECKING is
+    # False), so it is genuinely type-only and must not be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        import sys
+        if TYPE_CHECKING and sys.version_info >= (3, 11):
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_else_flagged(tmp_py: _WritePy) -> None:
+    # The `else` of `if TYPE_CHECKING:` runs at runtime, so an import there is real
+    # and must be flagged (the old parent-stack check wrongly exempted it).
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            pass
+        else:
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_deferred_stdlib_in_not_type_checking_flagged(tmp_py: _WritePy) -> None:
+    # A deferred stdlib import inside `if not TYPE_CHECKING:` within a function
+    # runs at runtime and must be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        def foo() -> None:
+            if not TYPE_CHECKING:
+                import json
+            return json
+    """)
+    assert "deferred-stdlib" in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_is_true_ok(tmp_py: _WritePy) -> None:
+    # `if TYPE_CHECKING is True:` is False at runtime, so the body is genuinely
+    # type-only and must NOT be flagged. Pins that the guard evaluator folds an
+    # identity comparison against a bool literal, not only and/or/not.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING is True:
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_eq_false_flagged(tmp_py: _WritePy) -> None:
+    # `if TYPE_CHECKING == False:` is True at runtime, so the import really runs
+    # and must be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING == False:  # noqa: E712
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
 def test_structlog_ok(tmp_py: _WritePy) -> None:
     path = tmp_py("""\
         from __future__ import annotations
@@ -2023,6 +2130,27 @@ def test_init_reexport_assignment_counts_as_local(tmp_py: _WritePy) -> None:
     assert "init-reexport" not in _rules(check(path))
 
 
+def test_init_reexport_runtime_block_assignment_counts_as_local(
+    tmp_py: _WritePy,
+) -> None:
+    # _locally_defined_names recurses into runtime control-flow blocks, so a
+    # name rebound inside a try/except (or if/with/for/while) at module scope
+    # counts as locally defined and is NOT treated as a bare re-export. This
+    # pins the relaxation introduced alongside init-all.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo, wrap
+
+        try:
+            Foo = wrap(Foo)
+        except Exception:
+            pass
+
+        __all__ = ["Foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
 def test_init_reexport_starred_all_skipped(tmp_py: _WritePy) -> None:
     path = tmp_py("""\
         from __future__ import annotations
@@ -2043,6 +2171,1062 @@ def test_init_reexport_violation_line(tmp_py: _WritePy) -> None:
     vs = [v for v in check(path) if v.rule == "init-reexport"]
     assert len(vs) == 1
     assert vs[0].line == 4
+
+
+# ---- init-all ----
+
+
+def test_init_all_missing_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" in _rules(check(path))
+
+
+def test_init_all_complete_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+
+        BAZ = 42
+
+        __all__ = ["foo", "Bar", "BAZ"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_incomplete_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "Bar" in vs[0].msg
+    # Reported at Bar's definition (line 5), not the __all__ line, so the
+    # violation lands on a changed line under --diff and points at the culprit.
+    assert vs[0].line == 5
+
+
+def test_init_all_underscore_names_not_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        def _private() -> None: ...
+
+        _CONST = 1
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_reexports_not_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Imported
+
+        def foo() -> None: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_non_init_file_ignored(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...
+        """,
+        name="mod.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_disable_comment_suppresses_presence(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        "from __future__ import annotations\n"
+        "def foo() -> None: ...  # xorq-style: disable=init-all\n",
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_disable_comment_suppresses_completeness(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        class Bar: ...  # xorq-style: disable=init-all
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_dynamic_all_not_flagged(tmp_py: _WritePy) -> None:
+    # __all__ present but computed (concat / sorted) — cannot be statically
+    # verified, so it must NOT be reported as "missing __all__".
+    for value in ('["foo"] + ["bar"]', 'sorted(["foo", "bar"])'):
+        path = tmp_py(
+            "from __future__ import annotations\n"
+            "def foo() -> None: ...\n"
+            "def bar() -> None: ...\n"
+            f"__all__ = {value}\n",
+            name="__init__.py",
+        )
+        assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_tuple_unpacking_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        a, b = 1, 2
+
+        __all__ = ["a"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`b`" in vs[0].msg
+
+
+def test_init_all_nested_runtime_def_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        try:
+            def foo() -> None: ...
+        except Exception:
+            foo = None
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`foo`" in vs[0].msg
+
+
+def test_init_all_type_checking_names_not_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            class Stub: ...
+
+        def foo() -> None: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_diff_mode_flags_new_name(tmp_py: _WritePy) -> None:
+    # A new public name added without touching __all__ must still be flagged
+    # under --diff, because the violation lands on the new definition's line.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def newfunc() -> None: ...
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path, only_lines=frozenset({4})) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "newfunc" in vs[0].msg
+    assert vs[0].line == 4
+
+
+def test_init_all_empty_file_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py("", name="__init__.py")
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_comment_only_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        # this package re-exports nothing of its own
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_reexport_only_ok(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Foo
+
+        __all__ = ["Foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_augmented_all_recognized(tmp_py: _WritePy) -> None:
+    # Names added via `__all__ += [...]` are listed at runtime and must not be
+    # reported as missing.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__ += ["bar"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_bare_annotation_not_required(tmp_py: _WritePy) -> None:
+    # A bare annotation (`x: int` with no value) does not bind a runtime name,
+    # so it cannot be exported and must not be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        x: int
+
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_bare_dunder_all_annotation_is_absent(tmp_py: _WritePy) -> None:
+    # `__all__: list[str]` (no value) binds no runtime `__all__`, so it is absent,
+    # not "present but unverifiable". The presence check must still fire.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        __all__: list[str]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`foo`" in vs[0].msg
+
+
+def test_init_all_def_shadowing_import_required(tmp_py: _WritePy) -> None:
+    # A name locally *defined* by def/class is a genuine new object and must be
+    # listed, even when it happens to share a name with an import (here `json`,
+    # bound by `import json.decoder`).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import json.decoder
+
+        def json() -> None: ...
+
+        __all__: list[str] = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`json`" in vs[0].msg
+
+
+def test_init_all_import_rebound_by_assignment_not_required(tmp_py: _WritePy) -> None:
+    # The optional-dependency idiom rebinds an imported name by *assignment*; it
+    # stays a re-export and is not required (the def/class override does not apply
+    # to assignment rebinds).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from other import Foo
+
+        try:
+            Foo = Foo
+        except Exception:
+            Foo = None
+
+        __all__: list[str] = []
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_conditional_all_recognized(tmp_py: _WritePy) -> None:
+    # __all__ assigned inside a runtime block is present, not absent — the
+    # presence check must not report it as missing.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        try:
+            __all__ = ["foo"]
+        except Exception:
+            __all__ = []
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_multi_target_all_recognized(tmp_py: _WritePy) -> None:
+    # `__all__ = _alias = [...]` declares __all__ (a multi-target assignment),
+    # so the presence check must not report it as missing. The aliased target
+    # here is underscore-private, so completeness is satisfied too.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+
+        __all__ = _alias = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_type_checking_else_required(tmp_py: _WritePy) -> None:
+    # The `else` of an `if TYPE_CHECKING:` runs at runtime, so a public name it
+    # binds is a real export and must be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            Stub = int
+        else:
+            def Real() -> None: ...
+
+        __all__ = ["Stub"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Real`" in vs[0].msg
+
+
+def test_init_all_match_block_def_required(tmp_py: _WritePy) -> None:
+    # Names bound inside a module-level `match`/`case` block run at runtime and
+    # must be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        match 1:
+            case 1:
+                Pub = 2
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Pub`" in vs[0].msg
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="PEP 695 `type X = ...` requires Python 3.12+"
+)
+def test_init_all_type_alias_required(tmp_py: _WritePy) -> None:
+    # A PEP 695 `type X = ...` alias binds a real public runtime object at module
+    # scope, just like def/class, so it must be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        type Point = tuple[int, int]
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Point`" in vs[0].msg
+
+
+def _all_subclasses(cls: type) -> set[type]:
+    subs = set(cls.__subclasses__())
+    return subs.union(*(_all_subclasses(s) for s in subs))
+
+
+def test_build_module_scope_classifies_every_statement_type() -> None:
+    # Structural guard against the recurring "close N more soundness gaps" churn:
+    # every ast.stmt node type must be CONSCIOUSLY classified as either binding a
+    # module-scope name (handled by _build_module_scope) or non-binding. When a
+    # future Python adds a statement node — the way `match` (3.10) and `type`
+    # aliases (3.12) arrived — it lands in neither set and fails this test, forcing
+    # a human to classify it instead of silently slipping past init-all.
+    binds_module_scope_name = {
+        # name-bearing definitions / imports, matched directly
+        "FunctionDef",
+        "AsyncFunctionDef",
+        "ClassDef",
+        "TypeAlias",
+        "Import",
+        "ImportFrom",
+        # assignment / binding statements (targets extracted generically)
+        "Assign",
+        "AnnAssign",
+        "AugAssign",
+        "Delete",
+        "For",
+        "AsyncFor",
+        "With",
+        "AsyncWith",
+        "Match",
+    }
+    non_binding = {
+        # control flow whose bodies are descended by _iter_module_scope_stmts, and
+        # leaf statements that bind no module-scope name of their own (a walrus in
+        # any of them is still caught by the generic _walrus_names pass).
+        "Return",
+        "Pass",
+        "Break",
+        "Continue",
+        "Raise",
+        "Assert",
+        "Expr",
+        "Global",
+        "Nonlocal",
+        "If",
+        "While",
+        "Try",
+        "TryStar",
+    }
+    known = binds_module_scope_name | non_binding
+    actual = {c.__name__ for c in _all_subclasses(ast.stmt)}
+    unclassified = actual - known
+    assert not unclassified, (
+        f"unclassified ast.stmt node types {unclassified}: classify each as "
+        "name-binding (handle it in _build_module_scope) or non-binding"
+    )
+
+
+def test_type_checking_guard_folds_every_boolean_operator() -> None:
+    # Structural guard for the SECOND churn model — how a `TYPE_CHECKING` guard
+    # evaluates. `_type_checking_value` folds a hand-listed set of boolean and
+    # comparison shapes, and the branch history shows it grew one operator at a
+    # time (`not`/`and`/`or`, then identity/equality in a later "close N gaps"
+    # commit). Enumerate every boolean/comparison operator the language has and
+    # assert each is CONSCIOUSLY either folded (the guard's runtime value is known)
+    # or left opaque (value unknown -> fail to silence). A future operator lands in
+    # neither set and fails here, the same forcing function the statement guard
+    # applies. The behavioral half ensures the declared lists cannot drift from
+    # `_type_checking_value`'s actual folding.
+    folded = {ast.Not, ast.And, ast.Or, ast.Is, ast.IsNot, ast.Eq, ast.NotEq}
+    opaque = {ast.UAdd, ast.USub, ast.Invert, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn}
+    declared = folded | opaque
+    actual = _all_subclasses(ast.unaryop) | _all_subclasses(ast.boolop) | _all_subclasses(ast.cmpop)
+    unclassified = {c.__name__ for c in actual - declared}
+    assert not unclassified, (
+        f"unclassified operator types {unclassified}: decide in _type_checking_value "
+        "whether a TYPE_CHECKING guard built from each folds to a known value or "
+        "stays opaque (fail to silence)"
+    )
+
+    tc = ast.Name(id="TYPE_CHECKING", ctx=ast.Load())
+    true = ast.Constant(value=True)
+
+    def _guard(op: type) -> ast.expr:
+        if issubclass(op, ast.unaryop):
+            return ast.UnaryOp(op=op(), operand=tc)
+        if issubclass(op, ast.boolop):
+            # Both operands must be foldable for `and`/`or` to have a known value;
+            # `_type_checking_value` folds a TYPE_CHECKING ref but not a bare literal
+            # operand (only the Compare path reads constants).
+            return ast.BoolOp(op=op(), values=[tc, tc])
+        return ast.Compare(left=tc, ops=[op()], comparators=[true])
+
+    for op in folded:
+        assert _type_checking_value(_guard(op)) is not None, op.__name__
+    for op in opaque:
+        assert _type_checking_value(_guard(op)) is None, op.__name__
+
+
+def test_mutates_dunder_all_shape_set_pinned() -> None:
+    # Structural guard for the THIRD churn model — how __all__ is resolved. Pins
+    # the exact set of shapes `_mutates_dunder_all` treats as an unverifiable
+    # in-place mutation vs. leaves alone, so a change to the classifier (or a new
+    # mutation form) must update this catalog consciously instead of silently
+    # flipping a module between verifiable and opaque.
+    mutates = [
+        "__all__.append('x')",
+        "__all__.extend(['x'])",
+        "__all__.sort()",
+        "__all__[0] = 'x'",
+        "__all__[1:1] = ['x']",
+        "del __all__[0]",  # del-subscript
+    ]
+    inert = [
+        "__all__ = ['x']",  # whole-name rebind, recoverable
+        "__all__: list[str]",  # bare annotation, binds no value
+        "for _n in __all__: pass",  # bare read
+        "x = len(__all__)",  # bare read
+        "_x, __all__ = 1, ['a']",  # unpacking handled in _build_module_scope, not here
+    ]
+    for src in mutates:
+        node = ast.parse(textwrap.dedent(src)).body[0]
+        assert _mutates_dunder_all(node), src
+    for src in inert:
+        node = ast.parse(textwrap.dedent(src)).body[0]
+        assert not _mutates_dunder_all(node), src
+
+
+# ---- init-all / init-reexport: soundness of __all__ resolution and local names ----
+#
+# These pin the policy that an __all__ the checker cannot fully model produces
+# no findings, and that every runtime binding form counts as locally defined.
+
+
+def test_init_all_extend_mutation_not_flagged(tmp_py: _WritePy) -> None:
+    # `__all__.extend(...)` mutates the export list in a way a static scan
+    # cannot reconstruct, so __all__ is unverifiable: completeness must not be
+    # checked (else `bar`, which IS exported at runtime, is a false positive).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__.extend(["bar"])
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_append_mutation_not_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__.append("bar")
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_subscript_assignment_not_flagged(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def bar() -> None: ...
+
+        __all__ = ["foo"]
+        __all__[1:1] = ["bar"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_for_target_required(tmp_py: _WritePy) -> None:
+    # A module-level `for` binds its target as a public module attribute, so it
+    # is a real export and IS required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        for Item in (1, 2):
+            pass
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Item`" in vs[0].msg
+
+
+def test_init_all_with_target_required(tmp_py: _WritePy) -> None:
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import contextlib
+
+        with contextlib.nullcontext() as Ctx:
+            pass
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Ctx`" in vs[0].msg
+
+
+def test_init_reexport_with_as_target_counts_as_local(tmp_py: _WritePy) -> None:
+    # `with ... as Resource` binds Resource locally, so listing it in __all__ of
+    # a non-__init__ module is NOT a bare re-export.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import make_ctx
+
+        with make_ctx() as Resource:
+            pass
+
+        __all__ = ["Resource"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_for_target_counts_as_local(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import items
+
+        for Item in items:
+            pass
+
+        __all__ = ["Item"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_walrus_target_counts_as_local(tmp_py: _WritePy) -> None:
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import compute
+
+        if (Result := compute()):
+            pass
+
+        __all__ = ["Result"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_undefined_name_not_flagged(tmp_py: _WritePy) -> None:
+    # A name in __all__ that is neither imported nor locally defined is not a
+    # re-export (it is an undefined-name problem, out of this rule's scope).
+    # init-reexport flags only on positive proof of an import, so it stays
+    # silent here rather than guessing.
+    path = tmp_py("""\
+        from __future__ import annotations
+
+        __all__ = ["NeverDefined"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_unlisted_import_target_extend_all_skipped(tmp_path: Path) -> None:
+    # When the target module builds __all__ via `.extend(...)`, its export set
+    # is unverifiable, so unlisted-import must not flag imports from it.
+    path = _make_project(
+        tmp_path,
+        target_code="""\
+            def foo() -> None: ...
+            def bar() -> None: ...
+            __all__ = ["foo"]
+            __all__.extend(["bar"])
+        """,
+        consumer_code="""\
+            from __future__ import annotations
+            from pkg.target import bar
+        """,
+    )
+    config = load_config(tmp_path)
+    assert "unlisted-import" not in _rules(check(path, config=config))
+
+
+def test_init_all_inverted_type_checking_guard_else_not_required(
+    tmp_py: _WritePy,
+) -> None:
+    # `if not TYPE_CHECKING:` inverts the branches: the body runs at runtime and
+    # the `else` is type-only. The checker cannot tell which branch is type-only
+    # for a non-canonical guard, so it must trust NEITHER — `Stub` (bound only in
+    # the type-only else) is not a runtime export and must not be required.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+
+        if not TYPE_CHECKING:
+            def real() -> None: ...
+        else:
+            class Stub: ...
+
+        __all__ = ["real"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_try_star_all_recognized(tmp_py: _WritePy) -> None:
+    # `__all__` declared inside a `try`/`except*` block is present at runtime; the
+    # module-scope walker must descend into except* handlers (structurally, not by
+    # an enumerated block list) so the presence check does not misreport it.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        try:
+            __all__ = ["foo"]
+        except* Exception:
+            __all__ = ["foo"]
+
+        def foo() -> None: ...
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_reexport_try_star_rebind_counts_as_local(tmp_py: _WritePy) -> None:
+    # A name rebound inside an `except*` handler at module scope counts as locally
+    # defined, so listing it in __all__ of a non-__init__ module is not a bare
+    # re-export. Pins that the walker reaches except* handler bodies.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import Foo
+
+        try:
+            pass
+        except* Exception:
+            Foo = None
+
+        __all__ = ["Foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_all_read_of_dunder_all_keeps_completeness(tmp_py: _WritePy) -> None:
+    # A bare *read* of __all__ (iterating it) is not an in-place mutation, so a
+    # static __all__ stays verifiable and a genuinely-missing public name is still
+    # flagged. Pins that opacity is restricted to mutations, not any reference.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def missing() -> None: ...
+
+        __all__ = ["foo"]
+        for _name in __all__:
+            pass
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`missing`" in vs[0].msg
+
+
+def test_init_all_split_annotation_keeps_completeness(tmp_py: _WritePy) -> None:
+    # A bare `__all__: list[str]` annotation followed by a real static assignment
+    # is verifiable (the annotation is not a mutation), so completeness still runs.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def foo() -> None: ...
+        def missing() -> None: ...
+
+        __all__: list[str]
+        __all__ = ["foo"]
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`missing`" in vs[0].msg
+
+
+def test_init_all_del_of_public_local_not_required(tmp_py: _WritePy) -> None:
+    # A module-scope `del` unbinds the name, so it is not a runtime module
+    # attribute and init-all must not require it in __all__ (was a false positive).
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        helper = 1
+        del helper
+        kept = 2
+
+        __all__ = ["kept"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_reexport_del_of_imported_name_not_flagged(tmp_py: _WritePy) -> None:
+    # `del` of an imported name removes it from the re-export set, so listing a
+    # *different* local name in __all__ is clean.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import gone
+
+        del gone
+        kept = 1
+
+        __all__ = ["kept"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_reassigned_all_not_flagged(tmp_py: _WritePy) -> None:
+    # __all__ reassigned: only the last value is the runtime export set, so a name
+    # present only in a superseded assignment is not a re-export and must not be
+    # flagged (the union would wrongly include it).
+    path = tmp_py("""\
+        from __future__ import annotations
+        from other import bar
+
+        __all__ = ["bar"]
+        __all__ = ["baz"]
+
+        baz = 1
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_branch_conditional_all_not_flagged(tmp_py: _WritePy) -> None:
+    # __all__ assigned only inside runtime branches is ambiguous (no single static
+    # assignment), so init-reexport stays silent rather than trusting the union of
+    # both branches — `bar` is exported on at most one of them.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import sys
+        from other import bar
+
+        if sys.version_info >= (3, 99):
+            __all__ = ["bar"]
+        else:
+            __all__ = []
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_reexport_single_conditional_all_not_flagged(tmp_py: _WritePy) -> None:
+    # A SINGLE __all__ assignment that is nested in a runtime `if` branch (no else)
+    # is still branch-conditional: it may never execute, so it does not provably
+    # establish the export set. `dunder_all_exact` must be None (gated on the
+    # assignment being unconditional, not merely the only one), so init-reexport
+    # stays silent instead of flagging `foo` off a conditionally-built __all__.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import os
+        from bar import foo
+
+        if os.name == "nt":
+            __all__ = ["foo"]
+    """)
+    assert "init-reexport" not in _rules(check(path))
+
+
+def test_init_all_mutually_exclusive_branches_not_required(tmp_py: _WritePy) -> None:
+    # A public name bound in only one arm of a mutually-exclusive `if`/`else` is
+    # not a guaranteed export — at most one arm runs — so requiring BOTH in __all__
+    # would be a false positive that no single __all__ can satisfy on every
+    # platform. Only the unconditionally-bound names are required; here `__all__`
+    # listing just the one for this platform is clean.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+        import sys
+
+        if sys.platform == "win32":
+            win = 1
+        else:
+            posix = 1
+
+        __all__ = ["win"]
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+def test_init_all_tuple_unpacked_all_recognized(tmp_py: _WritePy) -> None:
+    # `__all__` bound by tuple unpacking is present (its value just isn't a literal
+    # we can read), so it is unverifiable rather than absent — the presence check
+    # must not report a "missing __all__" false positive.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        def a() -> None: ...
+
+        __all__, _x = ["a"], 1
+        """,
+        name="__init__.py",
+    )
+    assert "init-all" not in _rules(check(path))
+
+
+# Runtime oracle: import each fixture and confirm no name the init-all rule
+# reports as "missing from __all__" is in fact present in the module's real
+# runtime __all__. This is the soundness property checked against ground truth
+# instead of against the cases we remembered to enumerate — it fails if any
+# __all__ construction the static resolver mismodels slips a real export past
+# the completeness check.
+_ORACLE_FIXTURES = {
+    "static": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo", "bar"]
+    """,
+    "genuine_violation": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+    """,
+    "extend": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__.extend(["bar"])
+    """,
+    "append": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__.append("bar")
+    """,
+    "subscript": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__[1:1] = ["bar"]
+    """,
+    "augmented_static": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"]
+        __all__ += ["bar"]
+    """,
+    "dynamic_concat": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        def bar() -> None: ...
+        __all__ = ["foo"] + ["bar"]
+    """,
+    "conditional_union": """\
+        from __future__ import annotations
+        import sys
+        def foo() -> None: ...
+        def bar() -> None: ...
+        if sys.maxsize > 0:
+            __all__ = ["foo", "bar"]
+        else:
+            __all__ = ["foo"]
+    """,
+    "for_target": """\
+        from __future__ import annotations
+        def foo() -> None: ...
+        for Item in (1, 2):
+            pass
+        __all__ = ["foo", "Item"]
+    """,
+}
+
+
+@pytest.mark.parametrize("fixture", sorted(_ORACLE_FIXTURES), ids=sorted(_ORACLE_FIXTURES))
+def test_init_all_sound_against_runtime_all(fixture: str, tmp_py: _WritePy) -> None:
+    source = textwrap.dedent(_ORACLE_FIXTURES[fixture])
+
+    namespace: dict[str, object] = {}
+    exec(compile(source, "<oracle>", "exec"), namespace)
+    runtime_all = set(namespace.get("__all__", ()))  # type: ignore[arg-type]
+
+    path = tmp_py(source, name="__init__.py")
+    flagged = {
+        m.group(1)
+        for v in check(path)
+        if v.rule == "init-all" and v.msg.startswith("public name")
+        if (m := re.search(r"`([^`]+)`", v.msg))
+    }
+
+    # Never report a name as missing that is actually exported at runtime.
+    assert flagged.isdisjoint(runtime_all), (
+        f"{fixture}: flagged {flagged} but runtime __all__ exports {runtime_all}"
+    )
 
 
 # ---- unlisted-import ----
