@@ -1177,6 +1177,60 @@ def test_stdlib_logging_in_type_checking_ok(tmp_py: _WritePy) -> None:
     assert "stdlib-logging" not in _rules(check(path))
 
 
+def test_stdlib_logging_in_not_type_checking_flagged(tmp_py: _WritePy) -> None:
+    # `if not TYPE_CHECKING:` is a RUNTIME block — the import actually runs, so it
+    # must be flagged. Pins the branch-aware classifier against the regression
+    # where any guard merely mentioning TYPE_CHECKING was treated as type-only.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if not TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_and_compound_ok(tmp_py: _WritePy) -> None:
+    # `if TYPE_CHECKING and ...:` body never runs at runtime (TYPE_CHECKING is
+    # False), so it is genuinely type-only and must not be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        import sys
+        if TYPE_CHECKING and sys.version_info >= (3, 11):
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_else_flagged(tmp_py: _WritePy) -> None:
+    # The `else` of `if TYPE_CHECKING:` runs at runtime, so an import there is real
+    # and must be flagged (the old parent-stack check wrongly exempted it).
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            pass
+        else:
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_deferred_stdlib_in_not_type_checking_flagged(tmp_py: _WritePy) -> None:
+    # A deferred stdlib import inside `if not TYPE_CHECKING:` within a function
+    # runs at runtime and must be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        def foo() -> None:
+            if not TYPE_CHECKING:
+                import json
+            return json
+    """)
+    assert "deferred-stdlib" in _rules(check(path))
+
+
 def test_structlog_ok(tmp_py: _WritePy) -> None:
     path = tmp_py("""\
         from __future__ import annotations

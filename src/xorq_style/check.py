@@ -204,7 +204,7 @@ class DeferredImportTestRule:
             if (
                 not isinstance(node, ast.Import | ast.ImportFrom)
                 or not _in_function(parents)
-                or _in_type_checking(parents)
+                or _in_type_checking(node, parents)
             ):
                 continue
             mods = _top_modules(node)
@@ -228,7 +228,7 @@ class DeferredStdlibRule:
             if (
                 not isinstance(node, ast.Import | ast.ImportFrom)
                 or not _in_function(parents)
-                or _in_type_checking(parents)
+                or _in_type_checking(node, parents)
             ):
                 continue
             for m in _top_modules(node):
@@ -253,7 +253,7 @@ class RedundantImportRule:
         for node, parents in ctx.walked:
             if not isinstance(node, ast.Import | ast.ImportFrom):
                 continue
-            if _in_function(parents) or _in_type_checking(parents):
+            if _in_function(parents) or _in_type_checking(node, parents):
                 continue
             toplevel_modules.update(_full_module_paths(node))
 
@@ -261,7 +261,7 @@ class RedundantImportRule:
             if (
                 not isinstance(node, ast.Import | ast.ImportFrom)
                 or not _in_function(parents)
-                or _in_type_checking(parents)
+                or _in_type_checking(node, parents)
             ):
                 continue
             for m in _full_module_paths(node):
@@ -660,7 +660,7 @@ class StdlibLoggingRule:
 
     def _check(self, ctx: CheckContext) -> Iterator[Violation]:
         for node, parents in ctx.walked:
-            if _in_type_checking(parents):
+            if _in_type_checking(node, parents):
                 continue
             match node:
                 case ast.Import() | ast.ImportFrom() if "logging" in _top_modules(node):
@@ -837,7 +837,7 @@ class LeafEnumImportRule:
         for node, parents in ctx.walked:
             if not isinstance(node, ast.Import | ast.ImportFrom):
                 continue
-            if _in_type_checking(parents):
+            if _in_type_checking(node, parents):
                 continue
             top_mods = _top_modules(node)
             if all(m == "__future__" or m in STDLIB for m in top_mods):
@@ -871,7 +871,7 @@ class UnlistedImportRule:
         for node, parents in ctx.walked:
             if not isinstance(node, ast.ImportFrom) or node.module is None:
                 continue
-            if _in_type_checking(parents):
+            if _in_type_checking(node, parents):
                 continue
             target = _resolve_module(node.module, project_root, src_roots)
             if target is None:
@@ -1097,18 +1097,8 @@ def _in_function(parents: tuple[ast.AST, ...]) -> bool:
     return any(isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef) for p in parents)
 
 
-def _is_type_checking_test(test: ast.expr) -> bool:
-    """True if an ``if`` ``test`` references ``TYPE_CHECKING`` *anywhere*.
-
-    Recognises the bare ``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:`` guard
-    *and* any compound or negated guard that mentions it (``if TYPE_CHECKING and
-    ...:``, ``if not TYPE_CHECKING:``). This is a coarse "is TYPE_CHECKING
-    involved at all" test; on its own it says nothing about *which* branch runs at
-    runtime. Callers that need that distinction pair it with
-    :func:`_is_canonical_type_checking_guard`. Keeping the one shape-list here
-    means the per-node (:func:`_module_scope_stmts`) and parent-stack
-    (:func:`_in_type_checking`) callers cannot drift apart.
-    """
+def _mentions_type_checking(test: ast.expr) -> bool:
+    """True if ``test`` references ``TYPE_CHECKING`` anywhere within it."""
     for node in ast.walk(test):
         match node:
             case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
@@ -1116,24 +1106,89 @@ def _is_type_checking_test(test: ast.expr) -> bool:
     return False
 
 
-def _is_canonical_type_checking_guard(test: ast.expr) -> bool:
-    """True only for the exact ``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:``.
+def _type_checking_value(test: ast.expr) -> bool | None:
+    """Statically evaluate an ``if`` guard with ``TYPE_CHECKING`` bound to ``False``.
 
-    This is the one guard whose runtime/type-only branch split is known: the body
-    is type-only and the ``else`` runs at runtime. A negated or compound guard
-    (``if not TYPE_CHECKING:``, ``if TYPE_CHECKING and ...:``) merely *mentions*
-    TYPE_CHECKING (:func:`_is_type_checking_test`) but does not tell us which
-    branch executes, so callers must treat it as fully unverifiable — trusting
-    either branch would risk requiring a phantom name from the wrong one.
+    ``TYPE_CHECKING`` is always ``False`` at runtime, so a guard built from it with
+    ``not`` / ``and`` / ``or`` has a knowable runtime truth value even when it is
+    not the bare ``if TYPE_CHECKING:`` form. Returns ``True`` / ``False`` when the
+    value is determined, or ``None`` when an unmodelled sub-expression leaves it
+    unknown. Only the boolean skeleton is interpreted; any other operand is
+    treated as statically unknown.
     """
     match test:
         case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
-            return True
+            return False
+        case ast.UnaryOp(op=ast.Not(), operand=operand):
+            inner = _type_checking_value(operand)
+            return None if inner is None else not inner
+        case ast.BoolOp(op=ast.And(), values=values):
+            vals = [_type_checking_value(v) for v in values]
+            if any(v is False for v in vals):
+                return False
+            return True if all(v is True for v in vals) else None
+        case ast.BoolOp(op=ast.Or(), values=values):
+            vals = [_type_checking_value(v) for v in values]
+            if any(v is True for v in vals):
+                return True
+            return False if all(v is False for v in vals) else None
+    return None
+
+
+def _branch_runs_at_runtime(test: ast.expr, *, body: bool) -> bool:
+    """Whether the ``body`` (or ``else``) of a guard executes at runtime.
+
+    The two TYPE_CHECKING callers consume this with opposite polarity, so the
+    uncertain case must not be a plain negation of :func:`_branch_is_type_only`:
+    a guard that *mentions* TYPE_CHECKING but whose value is unknown returns
+    ``False`` here (the module-scope walker fails to silence — it will not require
+    a name from a branch it cannot place) yet also ``False`` from
+    :func:`_branch_is_type_only` (the deferred-import rules will not exempt it).
+    A guard unrelated to TYPE_CHECKING runs both branches normally.
+    """
+    if not _mentions_type_checking(test):
+        return True
+    value = _type_checking_value(test)
+    if value is None:
+        return False
+    return value if body else not value
+
+
+def _branch_is_type_only(test: ast.expr, *, body: bool) -> bool:
+    """Whether the ``body`` (or ``else``) of a guard provably never runs at runtime.
+
+    Used by :func:`_in_type_checking` to exempt genuinely type-only code; an
+    unknown TYPE_CHECKING guard is *not* type-only (the branch may run), so it is
+    left to be flagged rather than wrongly exempted. See
+    :func:`_branch_runs_at_runtime` for why this is not its negation.
+    """
+    if not _mentions_type_checking(test):
+        return False
+    value = _type_checking_value(test)
+    if value is None:
+        return False
+    runs = value if body else not value
+    return not runs
+
+
+def _in_type_checking(node: ast.AST, parents: tuple[ast.AST, ...]) -> bool:
+    """True if ``node`` sits in a branch that provably runs only under TYPE_CHECKING.
+
+    Walks the parent chain looking for an enclosing ``if`` whose guard places
+    ``node``'s branch in type-only territory. Crucially this is branch-aware: the
+    runtime ``else`` of ``if TYPE_CHECKING:`` and the runtime body of
+    ``if not TYPE_CHECKING:`` are *not* exempted, so rules that forbid runtime
+    imports still fire there.
+    """
+    chain = (*parents, node)
+    for index in range(len(chain) - 1):
+        guard = chain[index]
+        if isinstance(guard, ast.If):
+            child = chain[index + 1]
+            in_body = any(child is stmt for stmt in guard.body)
+            if _branch_is_type_only(guard.test, body=in_body):
+                return True
     return False
-
-
-def _in_type_checking(parents: tuple[ast.AST, ...]) -> bool:
-    return any(isinstance(p, ast.If) and _is_type_checking_test(p.test) for p in parents)
 
 
 def _extract_all_names(node: ast.expr) -> frozenset[str] | None:
@@ -1346,14 +1401,15 @@ def _module_scope_stmts(tree: ast.Module) -> tuple[ast.stmt, ...]:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             return
         if isinstance(node, ast.If):
-            # Canonical `if TYPE_CHECKING:` → body type-only (skip), else runtime.
-            # A non-canonical guard that still mentions TYPE_CHECKING → which
-            # branch runs is unknowable, so skip both (fail to silence). Anything
-            # unrelated to TYPE_CHECKING → both branches run, walk both.
-            if _is_canonical_type_checking_guard(node.test):
-                yield from _visit(node.orelse)
-            elif not _is_type_checking_test(node.test):
+            # Walk each branch only when it provably runs at runtime. A guard built
+            # from TYPE_CHECKING (`if TYPE_CHECKING:`, `if not TYPE_CHECKING:`,
+            # `if TYPE_CHECKING and ...:`) has a knowable runtime value, so the real
+            # branch is walked and the type-only one skipped. A guard that mentions
+            # TYPE_CHECKING but cannot be evaluated yields neither branch (fail to
+            # silence). Anything unrelated to TYPE_CHECKING runs both branches.
+            if _branch_runs_at_runtime(node.test, body=True):
                 yield from _visit(node.body)
+            if _branch_runs_at_runtime(node.test, body=False):
                 yield from _visit(node.orelse)
             return
         # Every other statement: follow nested statement bodies wherever they
