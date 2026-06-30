@@ -1190,6 +1190,29 @@ def test_stdlib_logging_in_not_type_checking_flagged(tmp_py: _WritePy) -> None:
     assert "stdlib-logging" in _rules(check(path))
 
 
+def test_stdlib_logging_in_unrelated_type_checking_attr_flagged(tmp_py: _WritePy) -> None:
+    # `config.TYPE_CHECKING` is an unrelated attribute, not the typing sentinel, so
+    # the block runs at runtime and the import must be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import config
+        if config.TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
+
+
+def test_stdlib_logging_in_qualified_type_checking_ok(tmp_py: _WritePy) -> None:
+    # `typing.TYPE_CHECKING` is the sentinel in qualified form and must be exempt.
+    path = tmp_py("""\
+        from __future__ import annotations
+        import typing
+        if typing.TYPE_CHECKING:
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
 def test_stdlib_logging_in_type_checking_and_compound_ok(tmp_py: _WritePy) -> None:
     # `if TYPE_CHECKING and ...:` body never runs at runtime (TYPE_CHECKING is
     # False), so it is genuinely type-only and must not be flagged.

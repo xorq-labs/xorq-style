@@ -1128,13 +1128,26 @@ def _in_function(parents: tuple[ast.AST, ...]) -> bool:
     return any(isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef) for p in parents)
 
 
+def _is_type_checking_ref(node: ast.AST) -> bool:
+    """True if ``node`` is a reference to ``typing.TYPE_CHECKING``.
+
+    Matches the bare name (``from typing import TYPE_CHECKING``) and the qualified
+    forms ``typing.TYPE_CHECKING`` / ``typing_extensions.TYPE_CHECKING``. An
+    unrelated attribute that merely ends in ``TYPE_CHECKING`` (``config.TYPE_CHECKING``,
+    ``self.TYPE_CHECKING``) is *not* the typing sentinel and is not matched, so a
+    branch guarded by it is treated as ordinary runtime control flow.
+    """
+    match node:
+        case ast.Name(id="TYPE_CHECKING"):
+            return True
+        case ast.Attribute(value=ast.Name(id="typing" | "typing_extensions"), attr="TYPE_CHECKING"):
+            return True
+    return False
+
+
 def _mentions_type_checking(test: ast.expr) -> bool:
     """True if ``test`` references ``TYPE_CHECKING`` anywhere within it."""
-    for node in ast.walk(test):
-        match node:
-            case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
-                return True
-    return False
+    return any(_is_type_checking_ref(node) for node in ast.walk(test))
 
 
 def _type_checking_value(test: ast.expr) -> bool | None:
@@ -1147,9 +1160,9 @@ def _type_checking_value(test: ast.expr) -> bool | None:
     unknown. Only the boolean skeleton is interpreted; any other operand is
     treated as statically unknown.
     """
+    if _is_type_checking_ref(test):
+        return False
     match test:
-        case ast.Name(id="TYPE_CHECKING") | ast.Attribute(attr="TYPE_CHECKING"):
-            return False
         case ast.UnaryOp(op=ast.Not(), operand=operand):
             inner = _type_checking_value(operand)
             return None if inner is None else not inner
