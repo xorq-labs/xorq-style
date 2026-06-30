@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import io
 import json
 import re
+import sys
 import textwrap
 from typing import TYPE_CHECKING
 
@@ -1252,6 +1254,31 @@ def test_deferred_stdlib_in_not_type_checking_flagged(tmp_py: _WritePy) -> None:
             return json
     """)
     assert "deferred-stdlib" in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_is_true_ok(tmp_py: _WritePy) -> None:
+    # `if TYPE_CHECKING is True:` is False at runtime, so the body is genuinely
+    # type-only and must NOT be flagged. Pins that the guard evaluator folds an
+    # identity comparison against a bool literal, not only and/or/not.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING is True:
+            import logging
+    """)
+    assert "stdlib-logging" not in _rules(check(path))
+
+
+def test_stdlib_logging_in_type_checking_eq_false_flagged(tmp_py: _WritePy) -> None:
+    # `if TYPE_CHECKING == False:` is True at runtime, so the import really runs
+    # and must be flagged.
+    path = tmp_py("""\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING == False:  # noqa: E712
+            import logging
+    """)
+    assert "stdlib-logging" in _rules(check(path))
 
 
 def test_structlog_ok(tmp_py: _WritePy) -> None:
@@ -2559,6 +2586,85 @@ def test_init_all_match_block_def_required(tmp_py: _WritePy) -> None:
     vs = [v for v in check(path) if v.rule == "init-all"]
     assert len(vs) == 1
     assert "`Pub`" in vs[0].msg
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="PEP 695 `type X = ...` requires Python 3.12+"
+)
+def test_init_all_type_alias_required(tmp_py: _WritePy) -> None:
+    # A PEP 695 `type X = ...` alias binds a real public runtime object at module
+    # scope, just like def/class, so it must be required in __all__.
+    path = tmp_py(
+        """\
+        from __future__ import annotations
+
+        type Point = tuple[int, int]
+
+        __all__ = []
+        """,
+        name="__init__.py",
+    )
+    vs = [v for v in check(path) if v.rule == "init-all"]
+    assert len(vs) == 1
+    assert "`Point`" in vs[0].msg
+
+
+def _all_subclasses(cls: type) -> set[type]:
+    subs = set(cls.__subclasses__())
+    return subs.union(*(_all_subclasses(s) for s in subs))
+
+
+def test_build_module_scope_classifies_every_statement_type() -> None:
+    # Structural guard against the recurring "close N more soundness gaps" churn:
+    # every ast.stmt node type must be CONSCIOUSLY classified as either binding a
+    # module-scope name (handled by _build_module_scope) or non-binding. When a
+    # future Python adds a statement node — the way `match` (3.10) and `type`
+    # aliases (3.12) arrived — it lands in neither set and fails this test, forcing
+    # a human to classify it instead of silently slipping past init-all.
+    binds_module_scope_name = {
+        # name-bearing definitions / imports, matched directly
+        "FunctionDef",
+        "AsyncFunctionDef",
+        "ClassDef",
+        "TypeAlias",
+        "Import",
+        "ImportFrom",
+        # assignment / binding statements (targets extracted generically)
+        "Assign",
+        "AnnAssign",
+        "AugAssign",
+        "Delete",
+        "For",
+        "AsyncFor",
+        "With",
+        "AsyncWith",
+        "Match",
+    }
+    non_binding = {
+        # control flow whose bodies are descended by _iter_module_scope_stmts, and
+        # leaf statements that bind no module-scope name of their own (a walrus in
+        # any of them is still caught by the generic _walrus_names pass).
+        "Return",
+        "Pass",
+        "Break",
+        "Continue",
+        "Raise",
+        "Assert",
+        "Expr",
+        "Global",
+        "Nonlocal",
+        "If",
+        "While",
+        "Try",
+        "TryStar",
+    }
+    known = binds_module_scope_name | non_binding
+    actual = {c.__name__ for c in _all_subclasses(ast.stmt)}
+    unclassified = actual - known
+    assert not unclassified, (
+        f"unclassified ast.stmt node types {unclassified}: classify each as "
+        "name-binding (handle it in _build_module_scope) or non-binding"
+    )
 
 
 # ---- init-all / init-reexport: soundness of __all__ resolution and local names ----

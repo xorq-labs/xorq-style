@@ -1162,15 +1162,31 @@ def _mentions_type_checking(test: ast.expr) -> bool:
     return any(_is_type_checking_ref(node) for node in ast.walk(test))
 
 
+def _static_bool_operand(node: ast.expr) -> bool | None:
+    """The static boolean value of a comparison operand, or ``None`` if unknown.
+
+    A ``TYPE_CHECKING`` reference is ``False`` at runtime; a literal ``True`` /
+    ``False`` is itself. Anything else is statically unknown. Used by
+    :func:`_type_checking_value` to fold ``TYPE_CHECKING is True`` / ``== False``.
+    """
+    if _is_type_checking_ref(node):
+        return False
+    match node:
+        case ast.Constant(value=bool() as value):
+            return value
+    return None
+
+
 def _type_checking_value(test: ast.expr) -> bool | None:
     """Statically evaluate an ``if`` guard with ``TYPE_CHECKING`` bound to ``False``.
 
     ``TYPE_CHECKING`` is always ``False`` at runtime, so a guard built from it with
-    ``not`` / ``and`` / ``or`` has a knowable runtime truth value even when it is
-    not the bare ``if TYPE_CHECKING:`` form. Returns ``True`` / ``False`` when the
-    value is determined, or ``None`` when an unmodelled sub-expression leaves it
-    unknown. Only the boolean skeleton is interpreted; any other operand is
-    treated as statically unknown.
+    ``not`` / ``and`` / ``or`` — or an identity/equality comparison against a bool
+    literal (``TYPE_CHECKING is True``, ``TYPE_CHECKING == False``) — has a knowable
+    runtime truth value even when it is not the bare ``if TYPE_CHECKING:`` form.
+    Returns ``True`` / ``False`` when the value is determined, or ``None`` when an
+    unmodelled sub-expression leaves it unknown. Only this boolean skeleton is
+    interpreted; any other operand is treated as statically unknown.
     """
     if _is_type_checking_ref(test):
         return False
@@ -1188,43 +1204,42 @@ def _type_checking_value(test: ast.expr) -> bool | None:
             if any(v is True for v in vals):
                 return True
             return False if all(v is False for v in vals) else None
+        case ast.Compare(left=left, ops=[op], comparators=[right]) if isinstance(
+            op, ast.Is | ast.IsNot | ast.Eq | ast.NotEq
+        ):
+            lval = _static_bool_operand(left)
+            rval = _static_bool_operand(right)
+            if lval is None or rval is None:
+                return None
+            equal = lval is rval
+            return equal if isinstance(op, ast.Is | ast.Eq) else not equal
     return None
 
 
-def _branch_runs_at_runtime(test: ast.expr, *, body: bool) -> bool:
-    """Whether the ``body`` (or ``else``) of a guard executes at runtime.
+def _classify_guard(test: ast.expr) -> tuple[bool | None, bool | None]:
+    """Classify whether each branch of an ``if`` guard runs at runtime.
 
-    The two TYPE_CHECKING callers consume this with opposite polarity, so the
-    uncertain case must not be a plain negation of :func:`_branch_is_type_only`:
-    a guard that *mentions* TYPE_CHECKING but whose value is unknown returns
-    ``False`` here (the module-scope walker fails to silence — it will not require
-    a name from a branch it cannot place) yet also ``False`` from
-    :func:`_branch_is_type_only` (the deferred-import rules will not exempt it).
-    A guard unrelated to TYPE_CHECKING runs both branches normally.
+    Returns ``(body_runs, else_runs)``; each is ``True`` (the branch provably
+    runs), ``False`` (it provably never runs — type-only), or ``None`` (unknown).
+    The guard expression is walked once here, so both TYPE_CHECKING consumers
+    share one classification instead of recomputing it per branch:
+
+    * :func:`_iter_module_scope_stmts` walks a branch only when its state is
+      ``True`` — an unknown guard yields neither branch (fail to silence: it will
+      not require a name from a branch it cannot place).
+    * :func:`_in_type_checking` exempts a branch only when its state is ``False``
+      — an unknown guard exempts neither (the deferred-import rules still fire).
+
+    The consumers key off opposite poles of the same tri-state, so neither is the
+    other's negation; the ``None`` middle is what keeps "runs" and "type-only"
+    distinct for an unevaluable guard.
     """
     if not _mentions_type_checking(test):
-        return True
+        return (True, True)
     value = _type_checking_value(test)
     if value is None:
-        return False
-    return value if body else not value
-
-
-def _branch_is_type_only(test: ast.expr, *, body: bool) -> bool:
-    """Whether the ``body`` (or ``else``) of a guard provably never runs at runtime.
-
-    Used by :func:`_in_type_checking` to exempt genuinely type-only code; an
-    unknown TYPE_CHECKING guard is *not* type-only (the branch may run), so it is
-    left to be flagged rather than wrongly exempted. See
-    :func:`_branch_runs_at_runtime` for why this is not its negation.
-    """
-    if not _mentions_type_checking(test):
-        return False
-    value = _type_checking_value(test)
-    if value is None:
-        return False
-    runs = value if body else not value
-    return not runs
+        return (None, None)
+    return (value, not value)
 
 
 def _in_type_checking(node: ast.AST, parents: tuple[ast.AST, ...]) -> bool:
@@ -1242,7 +1257,8 @@ def _in_type_checking(node: ast.AST, parents: tuple[ast.AST, ...]) -> bool:
         if isinstance(guard, ast.If):
             child = chain[index + 1]
             in_body = any(child is stmt for stmt in guard.body)
-            if _branch_is_type_only(guard.test, body=in_body):
+            body_runs, else_runs = _classify_guard(guard.test)
+            if (body_runs if in_body else else_runs) is False:
                 return True
     return False
 
@@ -1380,6 +1396,17 @@ def _build_module_scope(tree: ast.Module) -> _ModuleScope:
 
     for node in _iter_module_scope_stmts(tree):
         is_all_assign = False
+        # PEP 695 ``type X = ...`` binds a new public runtime object at module
+        # scope, like def/class (required by init-all, and a genuine definition
+        # that overrides a same-named import). It is matched by node-class name
+        # rather than a ``case ast.TypeAlias()`` arm because ``ast.TypeAlias`` does
+        # not exist before Python 3.12 and mypy targets 3.10 — naming it would
+        # break the match on the older runtimes and fail the type check.
+        if type(node).__name__ == "TypeAlias":
+            alias_name = getattr(node, "name", None)
+            if isinstance(alias_name, ast.Name):
+                _record(alias_name.id, node.lineno)
+                definitions.add(alias_name.id)
         match node:
             case (
                 ast.FunctionDef(name=name)
@@ -1521,9 +1548,9 @@ def _iter_module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
     statements are seen, but does not descend into nested function/class scopes
     (their bodies are not module-level). A branch of an ``if`` guarded by
     TYPE_CHECKING is yielded only when that branch provably runs at runtime
-    (:func:`_branch_runs_at_runtime`): the ``else`` of ``if TYPE_CHECKING:`` runs
-    and is yielded, the body does not; a guard that mentions TYPE_CHECKING but
-    cannot be evaluated yields neither branch (fail to silence).
+    (:func:`_classify_guard`): the ``else`` of ``if TYPE_CHECKING:`` runs and is
+    yielded, the body does not; a guard that mentions TYPE_CHECKING but cannot be
+    evaluated yields neither branch (fail to silence).
 
     Descent is driven by AST *structure*, not by an enumerated set of block
     types: every nested statement body is followed — those held directly in a
@@ -1551,9 +1578,10 @@ def _iter_module_scope_stmts(tree: ast.Module) -> Iterator[ast.stmt]:
             # branch is walked and the type-only one skipped. A guard that mentions
             # TYPE_CHECKING but cannot be evaluated yields neither branch (fail to
             # silence). Anything unrelated to TYPE_CHECKING runs both branches.
-            if _branch_runs_at_runtime(node.test, body=True):
+            body_runs, else_runs = _classify_guard(node.test)
+            if body_runs is True:
                 yield from _visit(node.body)
-            if _branch_runs_at_runtime(node.test, body=False):
+            if else_runs is True:
                 yield from _visit(node.orelse)
             return
         # Every other statement: follow nested statement bodies wherever they
